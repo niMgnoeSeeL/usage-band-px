@@ -616,25 +616,22 @@ export const editorMetrics = (m: Measure | null, t: TurnTokens | null, at: numbe
 const SHINE_W = 18
 const MUTE = 'color-mix(in srgb,currentColor 75%,#888)'
 
-// How the row takes the width its tier leaves over (preview-only, `options.fill`):
-// - none: the groups keep their widths and the row ends where its last group does;
-// - grow: the bars lengthen, all by the same amount, so the row ends at the right edge; a tier
-//   with no bars widens its gaps instead;
-// - spread: every gap widens by the same amount, the hairline staying in its middle.
-export type Fill = 'none' | 'grow' | 'spread'
-export const fillOf = (v: unknown): Fill => (v === 'grow' || v === 'spread' ? v : 'none')
-// Where the row's last ink ends under `grow` and `spread`: the last figure's advance ends this far
-// inside the right edge, which puts its ink (the `%`'s side bearing is 0.5px) where the band's crab ends
+// The row takes the width its tier leaves over, so it ends at the right edge: its bars lengthen, all
+// by the same amount; a tier with no bars widens its gaps instead, each by the same amount, the
+// hairline staying in its middle.
+// The last figure's advance ends RIGHT_INSET inside the right edge, which puts its ink (the `%`'s
+// side bearing is 0.5px) where the band's crab ends. The first starts at LEFT_X, which puts its ink
+// (the `7`'s side bearing is about 0.5px) where the band's bar and the fold row's first button start.
 export const RIGHT_INSET = 1.5
+export const LEFT_X = -0.5
 
-// One tier's groups, laid out from x = 1: its width, and its markup. `E` is the width the tier
+// One tier's groups, laid out from x = LEFT_X: its width, and its markup. `E` is the width the tier
 // leaves over, as a CSS length; each part sits `k` shares of it further right.
-const editorTier = (ms: EMetric[], tier: Tier, ti: number, shines: boolean, fill: Fill = 'none') => {
+const editorTier = (ms: EMetric[], tier: Tier, ti: number, shines: boolean) => {
   const bars = tier.bar > 0 ? ms.filter(mt => mt.kind === 'limit').length : 0
   const gaps = Math.max(0, ms.length - 1)
-  const mode = fill === 'grow' && bars === 0 ? 'spread' : fill
-  const barShare = mode === 'grow' && bars > 0 ? 1 / bars : 0
-  const gapShare = mode === 'spread' && gaps > 0 ? 1 / gaps : 0
+  const barShare = bars > 0 ? 1 / bars : 0
+  const gapShare = bars === 0 && gaps > 0 ? 1 / gaps : 0
   const lay = (E: string | null) => {
     const fig = (hue: string, x: number, v: string) =>
       `<text x="${r3(x)}" y="${EBASE}" textLength="${r3(eTextW(v))}" lengthAdjust="spacing" class="n" style="${figureFill(hue)}">${esc(v)}</text>`
@@ -650,7 +647,7 @@ const editorTier = (ms: EMetric[], tier: Tier, ti: number, shines: boolean, fill
     // The shine crosses once; the markup drawn after it carries no animation
     const anim = (name: string) => ` style="animation:${name} 2.6s linear 1"`
     const used = new Map<string, string>()
-    let x = 1
+    let x = LEFT_X
     let k = 0
     const parts: { k: number; s: string }[] = []
     const put = (...s: string[]) => s.forEach(v => parts.push({ k, s: v }))
@@ -744,9 +741,9 @@ const editorTier = (ms: EMetric[], tier: Tier, ti: number, shines: boolean, fill
     return { end: x, body, used }
   }
   const { end } = lay(null)
-  const E = fill === 'none' ? null : `max(0px, 100% - ${r3(end + RIGHT_INSET)}px)`
+  const E = `max(0px, 100% - ${r3(end + RIGHT_INSET)}px)`
   const { body, used } = lay(E)
-  return { width: Math.ceil(end + 1), body, used }
+  return { width: Math.ceil(end + RIGHT_INSET), body, used }
 }
 
 // The icons in currentColor, which each icon's group sets to its hue (or leaves the muted text's)
@@ -760,9 +757,9 @@ const TARGET_ICON =
 
 // The markup: width 100% and no viewBox, so the webview draws it at the row's width and nothing
 // in it scales (CHECKLIST #3). `fresh` is whether the single shine after a change is still due.
-export const editorSvg = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[], fresh = true, fill: Fill = 'none') => {
+export const editorSvg = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[], fresh = true) => {
   const ms = editorMetrics(m, t, at, models)
-  const tiers = TIERS.map((tier, i) => editorTier(ms, tier, i, fresh, fill))
+  const tiers = TIERS.map((tier, i) => editorTier(ms, tier, i, fresh))
   // Tier i shows from its own width up to the next richer tier's; the last shows below that too
   const show = tiers
     .map((tr, i) => (i === 0 ? '' : `@media (max-width:${tiers[i - 1]!.width - 0.02}px){.v${i - 1}{display:none}.v${i}{display:inline}}`))
@@ -917,10 +914,7 @@ export const WELCOME =
   'usage-band is on: your 5h and 7d limits, context window and cache hit rate now show above the prompt. ' +
   'The limits fill in after Claude’s first reply.'
 
-// `options.fill` (`grow` or `spread`) is passed by the layout preview only; the plugin declares no
-// such option, so a session gets `none`.
-export const register: Register = (on, options) => {
-  const fill = fillOf((options as Record<string, unknown> | undefined)?.fill)
+export const register: Register = on => {
   let setting = 'auto'
   // The terminal animates by redrawing; started by its first draw, so a session without a terminal
   // never runs it. A reload drops the timer and this flag together.
@@ -1024,7 +1018,7 @@ export const register: Register = (on, options) => {
     if (e.surface === 'vscode') {
       const { Svg } = $.ui.resolve(e)
       const fresh = await read($, sweep)
-      const { svg } = editorSvg(m, t, at, models, fresh, fill)
+      const { svg } = editorSvg(m, t, at, models, fresh)
       row = (
         <Box flexDirection="row" flexWrap="nowrap">
           <Box flexDirection="column" width={0} flexGrow={1} minWidth={0}>

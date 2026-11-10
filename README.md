@@ -4,6 +4,8 @@ This is `usage-band-px`, a local fork of usage-band 1.0.6. It draws the band in 
 
 - **VS Code draws the desktop's look**, not the terminal's text: one Svg that fills the row (`width="100%"`, no viewBox, 13px high), in a column Box inside a nowrap row.
   - It holds five detail tiers, each laid out in full. A width media query shows the richest that fits on one line: bars with reset times, bars, short bars, figures alone, and figures without the context icon (fits a 280px panel).
+  - The row fills the box's width. The bars lengthen, all by the same amount (CSS `calc()` on each bar's width, and a `translateX` on what follows it), so the last figure's ink ends where the band's crab ends, 2px inside the content edge. A tier with no bars widens its gaps instead, each by the same amount, with the hairline in its middle. The context's dot matrix keeps its size.
+  - The first figure's ink starts at the content edge, where the band's bar and the fold row's first button start (`x = -0.5`, for the `7`'s side bearing).
   - Each metric keeps upstream's hue on its label, figure, bar and icon. A metric in trouble (a limit or the context past 80%, a hit rate under 50%) turns red.
   - Every color is worked out from `currentColor`, which the webview sets to the theme's text color. The markup asks no `prefers-color-scheme`: inside the webview's sandboxed frame that query follows the operating system, not the editor's theme (VS Code's `window.systemColorTheme` defaults to the system).
   - A step on the text's OKLCH lightness (`clamp(0, (0.7 - l) * 10, 1)`: 1 for a light theme's dark text, 0 for a dark theme's light text) picks each color's dark or light form.
