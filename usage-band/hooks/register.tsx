@@ -153,11 +153,8 @@ export const layout = (
   return look.colors === '256' ? spans.map(s => (s.color ? { ...s, color: to256(s.color) } : s)) : spans
 }
 
-// Where Claude Code draws its own `[-]` (collapse the band) over the band's first line: 3 cells and 1 to the right
-// edge. The usage row is that line whenever no band is above it, so it always leaves these cells, and one between.
-export const COLLAPSE_CELLS = 5
-
-// The terminal line: the richest detail that fits `cols` cells. With bars, the line takes all of them: every bar
+// The terminal line: the richest detail that fits `cols` cells. Claude Code's own `[-]` (collapse the band) sits right
+// of `bodyColumns`, over the slot's last 5 cells (measured in a live terminal), so the line never reaches it. With bars, the line takes all of them: every bar
 // lengthens by the same whole number of cells, so bars stay comparable, and the cells left over (fewer than the bars)
 // widen the last gap.
 export const fit = (m: Measure | null, t: TurnTokens | null, at: number, cols: number, frame: number, look: Look, models: Scoped[]): Span[] => {
@@ -1066,7 +1063,7 @@ export const register: Register = on => {
       const frame = await read($, phase)
       // The terminal font decides icons
       const s = await read($, style)
-      const spans = fit(m, t, at, e.props.bodyColumns - 2 - COLLAPSE_CELLS, frame, { style: s, colors: 'true' }, models)
+      const spans = fit(m, t, at, e.props.bodyColumns - 2, frame, { style: s, colors: 'true' }, models)
       const { Text } = $.ui.resolve(e)
       row = (
         <Box flexDirection="row" flexWrap="wrap" paddingX={1}>

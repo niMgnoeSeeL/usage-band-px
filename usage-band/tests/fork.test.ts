@@ -5,7 +5,6 @@ import { expect, mock, test } from 'claude-code/testing'
 import {
   SCOPED_EVERY_MS,
   SCOPED_URL,
-  COLLAPSE_CELLS,
   fit,
   LEFT_X,
   SPACE,
@@ -389,14 +388,14 @@ test('in the terminal every bar lengthens by the same whole cells, so the line f
   expect(fit(MEASURE, TURN, NOW, 50, 0, look, FABLE).map(s => s.text).join('')).not.toContain('■')
 })
 
-test('the terminal line leaves Claude Code\'s `[-]` its cells', async ($, on) => {
+test('the terminal line fills `bodyColumns` less its padding (Claude Code\'s `[-]` sits right of them)', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   world(on, new Map<string, unknown>([['welcomed', true]]), () => ({ status: 200, text: body() }))
   await $.session.start(START)
   await clock.settle()
   const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 120 } as never })
   const texts = ((await ui.findAll({ type: 'Text' })) as { children?: unknown[] }[]).map(t => (t.children ?? []).join('')).join('')
-  // paddingX 1 on each side, then COLLAPSE_CELLS
-  expect([...texts].length).toBe(120 - 2 - COLLAPSE_CELLS)
+  // paddingX 1 on each side
+  expect([...texts].length).toBe(120 - 2)
   await ui.unmount()
 })
