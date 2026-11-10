@@ -616,91 +616,137 @@ export const editorMetrics = (m: Measure | null, t: TurnTokens | null, at: numbe
 const SHINE_W = 18
 const MUTE = 'color-mix(in srgb,currentColor 75%,#888)'
 
-// One tier's groups, laid out from x = 1; its width, and its markup in two layers (type, and the
-// bars and dots with their shine)
-const editorTier = (ms: EMetric[], tier: Tier, ti: number, shines: boolean) => {
-  const fig = (hue: string, x: number, v: string) =>
-    `<text x="${r3(x)}" y="${EBASE}" textLength="${r3(eTextW(v))}" lengthAdjust="spacing" class="n" style="${figureFill(hue)}">${esc(v)}</text>`
-  const lab = fig
-  const mute = (x: number, v: string) =>
-    `<text x="${r3(x)}" y="${EBASE}" textLength="${r3(eTextW(v))}" lengthAdjust="spacing" class="m">${esc(v)}</text>`
-  const paintBar = (hue: string) => `fill:${barColor(hue)}`
-  const iconAt = (x: number, hue: string, body: string) =>
-    `<g class="ic" transform="translate(${r3(x)} ${EC.top})" style="color:${barColor(hue)}">${body}</g>`
-  // The shine crosses once; the markup drawn after it carries no animation
-  const anim = (dist: number) => ` style="animation:s${dist} 2.6s linear 1"`
-  const used = new Set<number>()
-  let x = 1
-  const parts: string[] = []
-  ms.forEach((mt, gi) => {
-    if (gi > 0) {
-      parts.push(`<rect x="${r3(Math.round(x + tier.gap / 2) - 0.5)}" y="${EC.top}" width="1" height="${EC.h}" class="sep"/>`)
-      x += tier.gap
-    }
-    const id = `t${ti}g${gi}`
-    if (mt.kind === 'limit') {
-      parts.push(lab(mt.hue, x, mt.label))
-      x += eTextW(mt.label) + tier.inner
-      if (tier.bar > 0) {
-        const fw = Math.max(mt.pct > 0 ? EBAR.h : 0, Math.min(tier.bar, (tier.bar * mt.pct) / 100))
-        const bar = `x="${r3(x)}" y="${EBAR.y}" height="${EBAR.h}" rx="${EBAR.h / 2}"`
-        parts.push(
-          `<rect ${bar} width="${tier.bar}" class="trk" style="${paintBar(mt.hue)}"/>`,
-          `<rect ${bar} width="${r3(fw)}" class="bar" style="${paintBar(mt.hue)}"/>`,
-        )
-        if (shines && fw > 0) {
-          used.add(tier.bar + SHINE_W)
-          parts.push(
-            `<clipPath id="c${id}"><rect ${bar} width="${r3(fw)}"/></clipPath>`,
-            `<g clip-path="url(#c${id})"><rect class="sh" x="${r3(x - SHINE_W)}" y="${EBAR.y}" width="${SHINE_W}" height="${EBAR.h}" fill="url(#shine)"${anim(tier.bar + SHINE_W)}/></g>`,
-          )
+// How the row takes the width its tier leaves over (preview-only, `options.fill`):
+// - none: the groups keep their widths and the row ends where its last group does;
+// - grow: the bars lengthen, all by the same amount, so the row ends at the right edge; a tier
+//   with no bars widens its gaps instead;
+// - spread: every gap widens by the same amount, the hairline staying in its middle.
+export type Fill = 'none' | 'grow' | 'spread'
+export const fillOf = (v: unknown): Fill => (v === 'grow' || v === 'spread' ? v : 'none')
+// Where the row's last ink ends under `grow` and `spread`: the last figure's advance ends this far
+// inside the right edge, which puts its ink (the `%`'s side bearing is 0.5px) where the band's crab ends
+export const RIGHT_INSET = 1.5
+
+// One tier's groups, laid out from x = 1: its width, and its markup. `E` is the width the tier
+// leaves over, as a CSS length; each part sits `k` shares of it further right.
+const editorTier = (ms: EMetric[], tier: Tier, ti: number, shines: boolean, fill: Fill = 'none') => {
+  const bars = tier.bar > 0 ? ms.filter(mt => mt.kind === 'limit').length : 0
+  const gaps = Math.max(0, ms.length - 1)
+  const mode = fill === 'grow' && bars === 0 ? 'spread' : fill
+  const barShare = mode === 'grow' && bars > 0 ? 1 / bars : 0
+  const gapShare = mode === 'spread' && gaps > 0 ? 1 / gaps : 0
+  const lay = (E: string | null) => {
+    const fig = (hue: string, x: number, v: string) =>
+      `<text x="${r3(x)}" y="${EBASE}" textLength="${r3(eTextW(v))}" lengthAdjust="spacing" class="n" style="${figureFill(hue)}">${esc(v)}</text>`
+    const lab = fig
+    const mute = (x: number, v: string) =>
+      `<text x="${r3(x)}" y="${EBASE}" textLength="${r3(eTextW(v))}" lengthAdjust="spacing" class="m">${esc(v)}</text>`
+    const paintBar = (hue: string) => `fill:${barColor(hue)}`
+    const iconAt = (x: number, hue: string, body: string) =>
+      `<g class="ic" transform="translate(${r3(x)} ${EC.top})" style="color:${barColor(hue)}">${body}</g>`
+    // A bar's length, and the shine's run across it, as CSS lengths
+    const grown = E && barShare ? `calc(${tier.bar}px + ${r3(barShare)} * ${E})` : `${tier.bar}px`
+    const run = E && barShare ? `calc(${tier.bar + SHINE_W}px + ${r3(barShare)} * ${E})` : `${tier.bar + SHINE_W}px`
+    // The shine crosses once; the markup drawn after it carries no animation
+    const anim = (name: string) => ` style="animation:${name} 2.6s linear 1"`
+    const used = new Map<string, string>()
+    let x = 1
+    let k = 0
+    const parts: { k: number; s: string }[] = []
+    const put = (...s: string[]) => s.forEach(v => parts.push({ k, s: v }))
+    ms.forEach((mt, gi) => {
+      if (gi > 0) {
+        const mid = Math.round(x + tier.gap / 2) - 0.5
+        k += gapShare / 2
+        put(`<rect x="${r3(mid)}" y="${EC.top}" width="1" height="${EC.h}" class="sep"/>`)
+        k += gapShare / 2
+        x += tier.gap
+      }
+      const id = `t${ti}g${gi}`
+      if (mt.kind === 'limit') {
+        put(lab(mt.hue, x, mt.label))
+        x += eTextW(mt.label) + tier.inner
+        if (tier.bar > 0) {
+          const fw = Math.max(mt.pct > 0 ? EBAR.h : 0, Math.min(tier.bar, (tier.bar * mt.pct) / 100))
+          const fill = E && barShare ? (mt.pct > 0 ? `max(${EBAR.h}px, calc(${grown} * ${r3(Math.min(100, mt.pct) / 100)}))` : '0px') : `${r3(fw)}px`
+          const bar = `x="${r3(x)}" y="${EBAR.y}" height="${EBAR.h}" rx="${EBAR.h / 2}"`
+          // A grown length goes in the style (a CSS length, after the paint), the plain one in the attribute
+          const sized = E && barShare
+          const rect = (cls: string, w: string, px: number) =>
+            `<rect ${bar} width="${r3(px)}"${cls ? ` class="${cls}"` : ''}` +
+            (cls || sized ? ` style="${[cls ? paintBar(mt.hue) : '', sized ? `width:${w}` : ''].filter(Boolean).join(';')}"` : '') + '/>'
+          put(rect('trk', grown, tier.bar), rect('bar', fill, fw))
+          if (shines && fw > 0) {
+            const name = barShare ? `s${ti}b` : `s${tier.bar + SHINE_W}`
+            used.set(name, run)
+            put(
+              `<clipPath id="c${id}">${rect('', fill, fw)}</clipPath>`,
+              `<g clip-path="url(#c${id})"><rect class="sh" x="${r3(x - SHINE_W)}" y="${EBAR.y}" width="${SHINE_W}" height="${EBAR.h}" fill="url(#shine)"${anim(name)}/></g>`,
+            )
+          }
+          x += tier.bar + tier.inner
+          k += barShare
         }
-        x += tier.bar + tier.inner
-      }
-      const pct = `${mt.pct}%`
-      parts.push(fig(mt.hue, x, pct))
-      x += eTextW(pct)
-      if (tier.resets && mt.left) {
-        x += tier.inner
-        parts.push(`<rect x="${r3(x)}" y="${EC.top}" width="1" height="${EC.h}" class="rule"/>`)
-        x += 1 + tier.inner
-        parts.push(mute(x, mt.left))
-        x += eTextW(mt.left)
-      }
-    } else if (mt.kind === 'ctx') {
-      if (tier.ctxIcon) {
-        parts.push(iconAt(x, mt.hue, LAYERS_ICON))
+        const pct = `${mt.pct}%`
+        put(fig(mt.hue, x, pct))
+        x += eTextW(pct)
+        if (tier.resets && mt.left) {
+          x += tier.inner
+          put(`<rect x="${r3(x)}" y="${EC.top}" width="1" height="${EC.h}" class="rule"/>`)
+          x += 1 + tier.inner
+          put(mute(x, mt.left))
+          x += eTextW(mt.left)
+        }
+      } else if (mt.kind === 'ctx') {
+        if (tier.ctxIcon) {
+          put(iconAt(x, mt.hue, LAYERS_ICON))
+          x += EICON + 4
+        }
+        if (tier.dots) {
+          const lit = Math.min(EDOT.cols * 2, Math.round((mt.pct / 100) * EDOT.cols * 2))
+          const dot = (i: number) => `<circle cx="${r3(x + EDOT.pitch / 2 + (i % EDOT.cols) * EDOT.pitch)}" cy="${r3(EDOT.rows[Math.floor(i / EDOT.cols)]!)}" r="${EDOT.r}"/>`
+          const on = Array.from({ length: lit }, (_, i) => dot(i)).join('')
+          const off = Array.from({ length: EDOT.cols * 2 - lit }, (_, i) => dot(lit + i)).join('')
+          const mw = EDOT.cols * EDOT.pitch
+          put(`<g class="trk" style="${paintBar(mt.hue)}">${off}</g>`, `<g class="bar" style="${paintBar(mt.hue)}">${on}</g>`)
+          if (shines && lit > 0) {
+            const name = `s${mw + SHINE_W}`
+            used.set(name, `${mw + SHINE_W}px`)
+            put(
+              `<clipPath id="c${id}">${on}</clipPath>`,
+              `<g clip-path="url(#c${id})"><rect class="sh" x="${r3(x - SHINE_W)}" y="${EC.top}" width="${SHINE_W}" height="${EC.h}" fill="url(#shine)"${anim(name)}/></g>`,
+            )
+          }
+          x += mw + tier.inner
+        }
+        put(fig(mt.hue, x, mt.tokens))
+        x += eTextW(mt.tokens) + 1
+        put(mute(x, mt.window))
+        x += eTextW(mt.window)
+      } else {
+        put(iconAt(x, mt.hue, TARGET_ICON))
         x += EICON + 4
+        const pct = `${mt.pct}%`
+        put(fig(mt.hue, x, pct))
+        x += eTextW(pct)
       }
-      if (tier.dots) {
-        const lit = Math.min(EDOT.cols * 2, Math.round((mt.pct / 100) * EDOT.cols * 2))
-        const dot = (i: number) => `<circle cx="${r3(x + EDOT.pitch / 2 + (i % EDOT.cols) * EDOT.pitch)}" cy="${r3(EDOT.rows[Math.floor(i / EDOT.cols)]!)}" r="${EDOT.r}"/>`
-        const on = Array.from({ length: lit }, (_, i) => dot(i)).join('')
-        const off = Array.from({ length: EDOT.cols * 2 - lit }, (_, i) => dot(lit + i)).join('')
-        const mw = EDOT.cols * EDOT.pitch
-        parts.push(`<g class="trk" style="${paintBar(mt.hue)}">${off}</g>`, `<g class="bar" style="${paintBar(mt.hue)}">${on}</g>`)
-        if (shines && lit > 0) {
-          used.add(mw + SHINE_W)
-          parts.push(
-            `<clipPath id="c${id}">${on}</clipPath>`,
-            `<g clip-path="url(#c${id})"><rect class="sh" x="${r3(x - SHINE_W)}" y="${EC.top}" width="${SHINE_W}" height="${EC.h}" fill="url(#shine)"${anim(mw + SHINE_W)}/></g>`,
-          )
-        }
-        x += mw + tier.inner
-      }
-      parts.push(fig(mt.hue, x, mt.tokens))
-      x += eTextW(mt.tokens) + 1
-      parts.push(mute(x, mt.window))
-      x += eTextW(mt.window)
-    } else {
-      parts.push(iconAt(x, mt.hue, TARGET_ICON))
-      x += EICON + 4
-      const pct = `${mt.pct}%`
-      parts.push(fig(mt.hue, x, pct))
-      x += eTextW(pct)
+    })
+    // Consecutive parts at the same share sit in one shifted group
+    let body = ''
+    for (let i = 0; i < parts.length; ) {
+      let j = i
+      let run2 = ''
+      while (j < parts.length && parts[j]!.k === parts[i]!.k) run2 += parts[j++]!.s
+      const kk = parts[i]!.k
+      body += E && kk > 0 ? `<g style="transform:translateX(calc(${r3(kk)} * ${E}))">${run2}</g>` : run2
+      i = j
     }
-  })
-  return { width: Math.ceil(x + 1), body: parts.join(''), used }
+    return { end: x, body, used }
+  }
+  const { end } = lay(null)
+  const E = fill === 'none' ? null : `max(0px, 100% - ${r3(end + RIGHT_INSET)}px)`
+  const { body, used } = lay(E)
+  return { width: Math.ceil(end + 1), body, used }
 }
 
 // The icons in currentColor, which each icon's group sets to its hue (or leaves the muted text's)
@@ -714,15 +760,15 @@ const TARGET_ICON =
 
 // The markup: width 100% and no viewBox, so the webview draws it at the row's width and nothing
 // in it scales (CHECKLIST #3). `fresh` is whether the single shine after a change is still due.
-export const editorSvg = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[], fresh = true) => {
+export const editorSvg = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[], fresh = true, fill: Fill = 'none') => {
   const ms = editorMetrics(m, t, at, models)
-  const tiers = TIERS.map((tier, i) => editorTier(ms, tier, i, fresh))
+  const tiers = TIERS.map((tier, i) => editorTier(ms, tier, i, fresh, fill))
   // Tier i shows from its own width up to the next richer tier's; the last shows below that too
   const show = tiers
     .map((tr, i) => (i === 0 ? '' : `@media (max-width:${tiers[i - 1]!.width - 0.02}px){.v${i - 1}{display:none}.v${i}{display:inline}}`))
     .join('')
-  const used = new Set(tiers.flatMap(tr => [...tr.used]))
-  const keys = [...used].map(d => `@keyframes s${d}{0%{transform:translateX(0)}62%,100%{transform:translateX(${d}px)}}`).join('')
+  const used = new Map(tiers.flatMap(tr => [...tr.used]))
+  const keys = [...used].map(([name, d]) => `@keyframes ${name}{0%{transform:translateX(0)}62%,100%{transform:translateX(${d})}}`).join('')
   const css =
     `text{font-family:Inter,"SF Pro Text",system-ui,-apple-system,"Segoe UI",sans-serif;font-size:13px;font-weight:500;font-feature-settings:"tnum","cv05"}` +
     `.n{fill:currentColor}.m{fill:currentColor;fill:${MUTE};font-weight:400}` +
@@ -871,7 +917,10 @@ export const WELCOME =
   'usage-band is on: your 5h and 7d limits, context window and cache hit rate now show above the prompt. ' +
   'The limits fill in after Claude’s first reply.'
 
-export const register: Register = on => {
+// `options.fill` (`grow` or `spread`) is passed by the layout preview only; the plugin declares no
+// such option, so a session gets `none`.
+export const register: Register = (on, options) => {
+  const fill = fillOf((options as Record<string, unknown> | undefined)?.fill)
   let setting = 'auto'
   // The terminal animates by redrawing; started by its first draw, so a session without a terminal
   // never runs it. A reload drops the timer and this flag together.
@@ -975,7 +1024,7 @@ export const register: Register = on => {
     if (e.surface === 'vscode') {
       const { Svg } = $.ui.resolve(e)
       const fresh = await read($, sweep)
-      const { svg } = editorSvg(m, t, at, models, fresh)
+      const { svg } = editorSvg(m, t, at, models, fresh, fill)
       row = (
         <Box flexDirection="row" flexWrap="nowrap">
           <Box flexDirection="column" width={0} flexGrow={1} minWidth={0}>

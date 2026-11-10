@@ -341,3 +341,32 @@ test('a survey keeps the slot to the hooks beneath', async ($, on) => {
   expect(await ui.find({ type: 'Svg' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: 'fold' })).toBeDefined()
 })
+
+// ---- Taking the box's width (fill-width branch, preview-only `fill`)
+
+test('grow lengthens every bar by one share of what the tier leaves, so the row ends at the right edge', async () => {
+  const none = editorSvg(MEASURE, TURN, NOW, FABLE, false)
+  const grow = editorSvg(MEASURE, TURN, NOW, FABLE, false, 'grow').svg
+  // The tiers, and so where each shows, stay as they are
+  expect(editorSvg(MEASURE, TURN, NOW, FABLE, false, 'grow').widths).toEqual(none.widths)
+  // The full tier: two bars of 60px take half each of what the row leaves past its last figure and RIGHT_INSET
+  expect(grow).toMatch(/class="trk" style="fill:[^"]*;width:calc\(60px \+ 0\.5 \* max\(0px, 100% - [\d.]+px\)\)"/)
+  // What follows a bar moves right by its share
+  expect(grow).toContain('<g style="transform:translateX(calc(0.5 * max(0px, 100% - ')
+  // A tier with no bars widens its gaps instead
+  expect(grow).toMatch(/<g class="v3"><text[^]*?<g style="transform:translateX\(calc\(0\.167 \* max/)
+})
+
+test('spread widens every gap by one share, the hairline at its middle', async () => {
+  const spread = editorSvg(MEASURE, TURN, NOW, FABLE, false, 'spread').svg
+  // Four groups, three gaps: the first hairline moves half a share, the group after it a whole one
+  expect(spread).toContain('translateX(calc(0.167 * max(0px, 100% - ')
+  expect(spread).toContain('translateX(calc(0.333 * max(0px, 100% - ')
+  expect(spread).not.toMatch(/width:calc\(/)
+})
+
+test('without fill the markup is the one main draws', async () => {
+  const svg = editorSvg(MEASURE, TURN, NOW, FABLE, true).svg
+  expect(svg).not.toContain('translateX(calc(')
+  expect(svg).toContain('@keyframes s78{')
+})
