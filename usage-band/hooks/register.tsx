@@ -510,23 +510,84 @@ export const oklch = (hex: string): [number, number, number] => {
   return [L, Math.hypot(A, B), ((Math.atan2(B, A) * 180) / Math.PI + 360) % 360]
 }
 
+// OKLCH to sRGB hex, and whether it is inside sRGB; WCAG contrast of two hex colors
+const oklchRgb = (L: number, C: number, H: number): number[] => {
+  const a = C * Math.cos((H * Math.PI) / 180)
+  const b = C * Math.sin((H * Math.PI) / 180)
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3
+  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3
+  return [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, -0.0041960863 * l - 0.7034186147 * m + 1.707614601 * s]
+}
+const inGamut = (L: number, C: number, H: number) => oklchRgb(L, C, H).every(v => v >= -1e-4 && v <= 1 + 1e-4)
+export const oklchHex = (L: number, C: number, H: number): string =>
+  `#${oklchRgb(L, C, H)
+    .map(v => Math.round(255 * Math.max(0, Math.min(1, v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055))).toString(16).padStart(2, '0'))
+    .join('')}`
+const luminance = (hex: string) => {
+  const n = parseInt(hex.slice(1), 16)
+  const ch = (v: number) => ((v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)
+  return 0.2126 * ch((n >> 16) & 255) + 0.7152 * ch((n >> 8) & 255) + 0.0722 * ch(n & 255)
+}
+export const contrast = (x: string, y: string) => {
+  const [hi, lo] = [luminance(x), luminance(y)].sort((p, q) => q - p)
+  return (hi! + 0.05) / (lo! + 0.05)
+}
+export const over = (fg: string, bg: string, alpha: number) =>
+  `#${[0, 1, 2].map(i => Math.round(alpha * parseInt(fg.slice(1 + 2 * i, 3 + 2 * i), 16) + (1 - alpha) * parseInt(bg.slice(1 + 2 * i, 3 + 2 * i), 16)).toString(16).padStart(2, '0')).join('')}`
+
 // The colors, each worked out from currentColor (the theme's text) in CSS, so one markup reads in
-// either theme; each carries a plain fallback for a renderer without relative colors.
-// - A figure tinted toward a hue keeps the text's own OKLCH lightness and takes the hue at a
-//   chroma of FIGURE_C, so it keeps about the text's contrast: 9.8:1 and up on the preview's
-//   themes, 5.3:1 and up on VS Code's Light (Visual Studio), whose text is 5.6:1.
-// - A bar or a lit dot is the hue at a lightness that follows the text's: 0.3 + 0.5 × its
-//   lightness. That is 4.2:1 and up against the background in those three themes, 3.2:1 and up
-//   against its track (WCAG 1.4.11), and close to the hue itself in a dark theme.
+// either theme; each carries a plain fallback for a renderer without relative colors. A step on
+// the text's OKLCH lightness tells the themes apart: 1 under 0.6 (a light theme's dark text), 0
+// over 0.7 (a dark theme's light text).
+// - Dark: a figure keeps the text's lightness and takes its hue at chroma 0.09; a bar or lit dot
+//   is the hue at lightness 0.3 + 0.5 × the text's, chroma up to 0.14. Both read close to the hue.
+// - Light: at the text's lightness a hue is a dull brown or grey, so each hue gets its own color:
+//   the lightest, at chroma up to LIGHT_C inside sRGB, that keeps 4.6:1 (a figure) or 3.05:1
+//   against both the background and its 22% track (a bar) on LIGHT_BGS.
 // - The track is the bar's color at 22% (upstream's); the hairlines are currentColor at upstream's
 //   opacities; muted text is currentColor mixed a quarter toward grey (4.8:1 and up).
-const FIGURE_C = 0.09
-const BAR = { l0: 0.3, k: 0.5, cMax: 0.14 }
+export const DARK = { figureC: 0.09, barL0: 0.3, barK: 0.5, barC: 0.14 } as const
+// VS Code's Light Modern (the preview's light theme) and Light (Visual Studio)'s side bar
+export const LIGHT_BGS = ['#f8f8f8', '#f3f3f3'] as const
+const LIGHT_C = 0.15
+export const LIGHT_NEED = { figure: 4.6, bar: 3.05 } as const
+const STEP = 'clamp(0, (0.7 - l) * 10, 1)'
 const r3 = (v: number) => +v.toFixed(3)
-const figureFill = (hue: string) => `fill:oklch(from currentColor l ${FIGURE_C} ${r3(oklch(hue)[2])})`
+
+// The lightest color of hue H at chroma up to LIGHT_C, in gamut, that `ok` accepts
+const lightest = (H: number, ok: (hex: string) => boolean): { L: number; C: number } => {
+  for (let i = 700; i > 300; i--) {
+    const L = i / 1000
+    let C = 0
+    while (C + 0.001 <= LIGHT_C && inGamut(L, C + 0.001, H)) C += 0.001
+    if (ok(oklchHex(L, C, H))) return { L: r3(L), C: r3(C) }
+  }
+  return { L: 0.3, C: 0 }
+}
+const lightCache = new Map<string, { figure: { L: number; C: number }; bar: { L: number; C: number } }>()
+export const lightTint = (hue: string) => {
+  let t = lightCache.get(hue)
+  if (!t) {
+    const H = oklch(hue)[2]
+    t = {
+      figure: lightest(H, x => LIGHT_BGS.every(bg => contrast(x, bg) >= LIGHT_NEED.figure)),
+      bar: lightest(H, x => LIGHT_BGS.every(bg => contrast(x, bg) >= LIGHT_NEED.bar && contrast(x, over(x, bg, 0.22)) >= LIGHT_NEED.bar)),
+    }
+    lightCache.set(hue, t)
+  }
+  return t
+}
+// A channel that is `dark` in a dark theme and `light` in a light one
+const stepped = (dark: string, light: number) => `calc(${dark} + ${STEP} * (${light} - (${dark})))`
+const figureFill = (hue: string) => {
+  const { figure } = lightTint(hue)
+  return `fill:oklch(from currentColor ${stepped('l', figure.L)} ${stepped(String(DARK.figureC), figure.C)} ${r3(oklch(hue)[2])})`
+}
 const barColor = (hue: string) => {
   const [, c, h] = oklch(hue)
-  return `oklch(from currentColor calc(${BAR.l0} + ${BAR.k} * l) ${r3(Math.min(c, BAR.cMax))} ${r3(h)})`
+  const { bar } = lightTint(hue)
+  return `oklch(from currentColor ${stepped(`${DARK.barL0} + ${DARK.barK} * l`, bar.L)} ${stepped(String(r3(Math.min(c, DARK.barC))), bar.C)} ${r3(h)})`
 }
 
 // The box's one accent (savvy-progress's band) for look C
@@ -558,7 +619,7 @@ export const editorMetrics = (m: Measure | null, t: TurnTokens | null, at: numbe
   return out
 }
 
-type Shine = 'always' | 'once' | 'none'
+export type Shine = 'always' | 'once' | 'none'
 type Paint = { figure: (hue: string) => string; label: (hue: string) => string; bar: (hue: string) => string; icon: (hue: string) => string }
 
 // A: upstream's look, every figure and label tinted with its metric's hue, bars and icons in it
@@ -572,6 +633,9 @@ const PAINT: Record<EditorLook, Paint> = {
   C: { figure: h => (h === RED ? figureFill(h) : ''), label: () => '', bar: h => barColor(h === RED ? RED : ACCENT), icon: () => '' },
 }
 export const SHINE: Record<EditorLook, Shine> = { A: 'always', B: 'once', C: 'none' }
+// `options.motion` (`loop`, `once` or `none`) overrides a look's shine, for the layout preview
+export const shineOf = (look: EditorLook, motion: unknown): Shine =>
+  motion === 'loop' ? 'always' : motion === 'once' ? 'once' : motion === 'none' ? 'none' : SHINE[look]
 
 const SHINE_W = 18
 const MUTE = 'color-mix(in srgb,currentColor 75%,#888)'
@@ -675,9 +739,9 @@ const TARGET_ICON =
 
 // The markup: width 100% and no viewBox, so the webview draws it at the row's width and nothing
 // in it scales (CHECKLIST #3). `fresh` is whether look B's single shine is still due.
-export const editorSvg = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[], look: EditorLook, fresh = true) => {
+export const editorSvg = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[], look: EditorLook, fresh = true, motion: Shine = SHINE[look]) => {
   const ms = editorMetrics(m, t, at, models)
-  const shine: Shine = SHINE[look] === 'once' && !fresh ? 'none' : SHINE[look]
+  const shine: Shine = motion === 'once' && !fresh ? 'none' : motion
   const tiers = TIERS.map((tier, i) => editorTier(ms, tier, i, look, shine))
   // Tier i shows from its own width up to the next richer tier's; the last shows below that too
   const show = tiers
@@ -765,12 +829,12 @@ export const endsSpaced = (node: unknown) => spaced(node, 'bottom')
 const shown = (m: Measure | null, t: TurnTokens | null, at: number, s: ScopedReading | null) =>
   desktopSvg(m, t, at, modelsAt(s, at)).svg
 
-// Look B's shine crosses once after what the row shows changes, then the markup carries no
-// animation, so the webview stops drawing it frame by frame
+// A single shine (look B's, or `motion: once`) crosses once after what the row shows changes,
+// then the markup carries no animation, so the webview stops drawing it frame by frame
 const SWEEP_MS = 3_000
-let sweepLook: EditorLook | null = null
+let sweepShine: Shine = 'none'
 const swept = async ($: EngineInterface) => {
-  if (sweepLook !== 'B') return
+  if (sweepShine !== 'once') return
   await update($, sweep, () => true)
   $.clock.after(SWEEP_MS, () => {
     void update($, sweep, () => false)
@@ -835,12 +899,13 @@ export const WELCOME =
   'usage-band is on: your 5h and 7d limits, context window and cache hit rate now show above the prompt. ' +
   'The limits fill in after Claude’s first reply.'
 
-// `options.look` picks the VS Code look (A, B or C) for the layout preview, which passes it; the
-// plugin declares no such option, so a session gets the default.
+// `options.look` picks the VS Code look (A, B or C) and `options.motion` its shine, for the layout
+// preview, which passes them; the plugin declares neither option, so a session gets the defaults.
 export const register: Register = (on, options) => {
   let setting = 'auto'
   const look = editorLookOf((options as Record<string, unknown> | undefined)?.look)
-  sweepLook = look
+  const motion = shineOf(look, (options as Record<string, unknown> | undefined)?.motion)
+  sweepShine = motion
   // The terminal animates by redrawing; started by its first draw, so a session without a terminal
   // never runs it. A reload drops the timer and this flag together.
   let isAnimating = false
@@ -943,7 +1008,7 @@ export const register: Register = (on, options) => {
     if (e.surface === 'vscode') {
       const { Svg } = $.ui.resolve(e)
       const fresh = await read($, sweep)
-      const { svg } = editorSvg(m, t, at, models, look, fresh)
+      const { svg } = editorSvg(m, t, at, models, look, fresh, motion)
       row = (
         <Box flexDirection="row" flexWrap="nowrap">
           <Box flexDirection="column" width={0} flexGrow={1} minWidth={0}>

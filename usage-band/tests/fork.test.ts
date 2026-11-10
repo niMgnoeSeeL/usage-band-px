@@ -7,12 +7,25 @@ import {
   SCOPED_EVERY_MS,
   SCOPED_URL,
   SPACE,
+  contrast,
   editorSvg,
   modelsAt,
   oklch,
+  oklchHex,
+  over,
   parseScoped,
 } from '../hooks/register'
 import type { Measure, TurnTokens } from '../types'
+
+// The colors in the markup, as `oklch(from currentColor <L> <C> <H>)` where L and C step from their dark-theme
+// value to their light-theme one: `calc(<dark> + clamp(0, (0.7 - l) * 10, 1) * (<light> - (<dark>)))`
+const N = String.raw`-?[\d.]+`
+// `again` is the dark value once more, inside the brackets, uncaptured
+const STEPPED = (dark: string, again = dark) => String.raw`calc\(${dark} \+ clamp\(0, \(0\.7 - l\) \* 10, 1\) \* \((${N}) - \(${again}\)\)\)`
+const FIGURE = new RegExp(String.raw`fill:oklch\(from currentColor ${STEPPED('l')} ${STEPPED(String.raw`0\.09`)} (${N})\)`, 'g')
+const BAR_RE = new RegExp(String.raw`class="bar" style="fill:oklch\(from currentColor ${STEPPED(String.raw`0\.3 \+ 0\.5 \* l`)} ${STEPPED(`(${N})`, N)} (${N})\)`, 'g')
+const figuresOf = (svg: string) => [...svg.matchAll(FIGURE)].map(m => ({ lightL: +m[1]!, lightC: +m[2]!, h: +m[3]! }))
+const barsOf = (svg: string) => [...svg.matchAll(BAR_RE)].map(m => ({ lightL: +m[1]!, darkC: +m[2]!, lightC: +m[3]!, h: +m[4]! }))
 
 const NOW = Date.parse('2026-11-10T12:00:00Z')
 const MIN = 60_000
@@ -194,12 +207,15 @@ test('looks differ in hue and motion: A always shines, B once after a change, C 
   // Motion stops under prefers-reduced-motion (CHECKLIST #13)
   for (const moving of [a, bFresh]) expect(moving).toContain('@media (prefers-reduced-motion:reduce){.sh{animation:none!important}}')
   // A tints the figures; B and C draw them in the text color
-  expect(a).toMatch(/class="n" style="fill:oklch\(from currentColor l/)
+  expect(figuresOf(a).length).toBeGreaterThan(0)
   expect(bStill).not.toMatch(/class="n" style=/)
   // C's bars and dots are the one accent (savvy-progress's band); B's keep each metric's hue (7d, Fable, context)
-  const hues = (s: string) => new Set([...s.matchAll(/class="bar" style="fill:oklch\(from currentColor calc\([^)]*\) [\d.]+ ([\d.]+)\)/g)].map(m => m[1]))
+  const hues = (s: string) => new Set(barsOf(s).map(b => b.h))
   expect(hues(c).size).toBe(1)
   expect(hues(bStill).size).toBe(3)
+  // A's motion can be set apart from its hues: once, as B's
+  expect(editorSvg(MEASURE, TURN, NOW, FABLE, 'A', true, 'once').svg).toContain('linear 1"')
+  expect(editorSvg(MEASURE, TURN, NOW, FABLE, 'A', false, 'once').svg).not.toContain('animation:s')
 })
 
 test('a metric in trouble turns its figure and bar red in every look', async () => {
@@ -207,62 +223,57 @@ test('a metric in trouble turns its figure and bar red in every look', async () 
   const red = oklch('#e5685f')[2].toFixed(3)
   for (const look of EDITOR_LOOKS) {
     const { svg } = editorSvg(hot, TURN, NOW, [], look)
-    expect(svg).toContain(`style="fill:oklch(from currentColor l 0.09 ${+red})"`)
-    expect(svg).toMatch(new RegExp(`class="bar" style="fill:oklch\\(from currentColor calc\\([^)]*\\) [\\d.]+ ${+red}\\)`))
+    expect(figuresOf(svg).some(f => f.h === +red)).toBe(true)
+    expect(barsOf(svg).some(b => b.h === +red)).toBe(true)
   }
 })
 
 // The colors the webview works out, against VS Code's themes: the preview's light and dark, and
-// Light (Visual Studio), the theme this machine uses (text #616161 on #f3f3f3)
+// Light (Visual Studio), the theme this machine uses (text #616161 on its side bar's #f3f3f3)
 const THEMES = [
   { text: '#3b3b3b', bg: '#f8f8f8' },
   { text: '#cccccc', bg: '#1f1f1f' },
   { text: '#616161', bg: '#f3f3f3' },
 ]
-const fromOklch = (L: number, C: number, H: number): string => {
-  const a = C * Math.cos((H * Math.PI) / 180)
-  const b = C * Math.sin((H * Math.PI) / 180)
-  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3
-  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3
-  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3
-  const lin = [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s, -0.0041960863 * l - 0.7034186147 * m + 1.707614601 * s]
-  const enc = (v: number) => Math.round(255 * Math.max(0, Math.min(1, v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055)))
-  return `#${lin.map(v => enc(v).toString(16).padStart(2, '0')).join('')}`
-}
-const lum = (hex: string) => {
-  const n = parseInt(hex.slice(1), 16)
-  const ch = (v: number) => ((v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)
-  return 0.2126 * ch((n >> 16) & 255) + 0.7152 * ch((n >> 8) & 255) + 0.0722 * ch(n & 255)
-}
-const ratio = (x: string, y: string) => {
-  const [hi, lo] = [lum(x), lum(y)].sort((p, q) => q - p)
-  return (hi! + 0.05) / (lo! + 0.05)
-}
+// The step from the dark-theme value to the light-theme one, as the markup's clamp() works it out
+const step = (l: number) => Math.max(0, Math.min(1, (0.7 - l) * 10))
 
 test('figures keep 4.5:1 and bars 3:1, against the background and their track, in every theme', async () => {
   for (const look of EDITOR_LOOKS) {
     const hot: Measure = { ...MEASURE, rateLimits: [{ kind: 'seven_day', percentUsed: 85, resetsAt: RESET }] }
     const svg = editorSvg(MEASURE, TURN, NOW, FABLE, look).svg + editorSvg(hot, { ...TURN, cacheRead: 100 }, NOW, FABLE, look).svg
-    const figures = [...svg.matchAll(/fill:oklch\(from currentColor l ([\d.]+) ([\d.]+)\)/g)].map(m => [+m[1]!, +m[2]!] as const)
-    const bars = [...svg.matchAll(/fill:oklch\(from currentColor calc\(([\d.]+) \+ ([\d.]+) \* l\) ([\d.]+) ([\d.]+)\)/g)].map(m => [+m[1]!, +m[2]!, +m[3]!, +m[4]!] as const)
-    if (look !== 'A') expect(figures.length).toBeGreaterThan(0) // the red ones
+    const figures = figuresOf(svg)
+    const bars = barsOf(svg)
+    expect(figures.length).toBeGreaterThan(0) // A's, and every look's red ones
     expect(bars.length).toBeGreaterThan(0)
     for (const { text, bg } of THEMES) {
-      const L = oklch(text)[0]
-      for (const [c, h] of figures) expect(ratio(fromOklch(L, c, h), bg)).toBeGreaterThanOrEqual(4.5)
-      for (const [l0, k, c, h] of bars) {
-        const fill = fromOklch(l0 + k * L, c, h)
-        expect(ratio(fill, bg)).toBeGreaterThanOrEqual(3)
+      const l = oklch(text)[0]
+      const s = step(l)
+      for (const f of figures) {
+        const hex = oklchHex(l + s * (f.lightL - l), 0.09 + s * (f.lightC - 0.09), f.h)
+        expect(contrast(hex, bg)).toBeGreaterThanOrEqual(4.5)
+      }
+      for (const b of bars) {
+        const dark = 0.3 + 0.5 * l
+        const fill = oklchHex(dark + s * (b.lightL - dark), b.darkC + s * (b.lightC - b.darkC), b.h)
+        expect(contrast(fill, bg)).toBeGreaterThanOrEqual(3)
         // The track is the fill at 22% over the background
-        const n = (x: string, i: number) => parseInt(x.slice(1 + 2 * i, 3 + 2 * i), 16)
-        const track = `#${[0, 1, 2].map(i => Math.round(0.22 * n(fill, i) + 0.78 * n(bg, i)).toString(16).padStart(2, '0')).join('')}`
-        expect(ratio(fill, track)).toBeGreaterThanOrEqual(3)
+        expect(contrast(fill, over(fill, bg, 0.22))).toBeGreaterThanOrEqual(3)
       }
       // Muted text: currentColor mixed a quarter toward grey
-      const mute = `#${[0, 1, 2].map(i => Math.round(0.75 * parseInt(text.slice(1 + 2 * i, 3 + 2 * i), 16) + 0.25 * 0x88).toString(16).padStart(2, '0')).join('')}`
-      expect(ratio(mute, bg)).toBeGreaterThanOrEqual(4.5)
+      expect(contrast(over(text, '#888888', 0.75), bg)).toBeGreaterThanOrEqual(4.5)
     }
   }
+})
+
+test('in a light theme each hue keeps its own color, not a brown or grey near the text', async () => {
+  // The light-theme figures, by hue: far enough apart that 7d, Fable, the context and the cache read as four colors
+  const svg = editorSvg(MEASURE, TURN, NOW, FABLE, 'A').svg
+  const seen = new Map(figuresOf(svg).map(f => [f.h, f] as const))
+  expect(seen.size).toBe(4)
+  for (const f of seen.values()) expect(f.lightC).toBeGreaterThanOrEqual(0.11)
+  // and lighter than the text (0.36 in the preview's light theme), as far as 4.5:1 allows
+  for (const f of seen.values()) expect(f.lightL).toBeGreaterThan(0.5)
 })
 
 // ---- Stacking (layout/ABOVE-PROMPT.md, C1 and C2)
