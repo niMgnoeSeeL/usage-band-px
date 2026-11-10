@@ -3,7 +3,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import {
-  EDITOR_LOOKS,
   SCOPED_EVERY_MS,
   SCOPED_URL,
   SPACE,
@@ -180,52 +179,50 @@ test('VS Code draws one SVG that fills the row, worked out from the theme text c
 })
 
 test('each tier fits the width that shows it, the last a 280px panel', async () => {
-  const at = NOW
-  for (const look of EDITOR_LOOKS) {
-    const { svg, widths } = editorSvg(MEASURE, TURN, at, FABLE, look)
-    for (let i = 1; i < widths.length; i++) expect(widths[i]!).toBeLessThan(widths[i - 1]!)
-    // A 280px panel leaves 262px inside the frame's border and padding
-    expect(widths[widths.length - 1]!).toBeLessThanOrEqual(262)
-    // 640px leaves 622: the full tier, with bars and reset times
-    expect(widths[0]!).toBeLessThanOrEqual(622)
-    expect(svg).toContain(`@media (max-width:${widths[0]! - 0.02}px){.v0{display:none}.v1{display:inline}}`)
-    // The bars and the reset time are in the full tier
-    expect(svg).toContain('4d6h')
-  }
+  const { svg, widths } = editorSvg(MEASURE, TURN, NOW, FABLE)
+  for (let i = 1; i < widths.length; i++) expect(widths[i]!).toBeLessThan(widths[i - 1]!)
+  // A 280px panel leaves 262px inside the frame's border and padding
+  expect(widths[widths.length - 1]!).toBeLessThanOrEqual(262)
+  // 640px leaves 622: the full tier, with bars and reset times
+  expect(widths[0]!).toBeLessThanOrEqual(622)
+  expect(svg).toContain(`@media (max-width:${widths[0]! - 0.02}px){.v0{display:none}.v1{display:inline}}`)
+  // The bars and the reset time are in the full tier
+  expect(svg).toContain('4d6h')
 })
 
-test('looks differ in hue and motion: A always shines, B once after a change, C never', async () => {
-  const a = editorSvg(MEASURE, TURN, NOW, FABLE, 'A').svg
-  const bFresh = editorSvg(MEASURE, TURN, NOW, FABLE, 'B', true).svg
-  const bStill = editorSvg(MEASURE, TURN, NOW, FABLE, 'B', false).svg
-  const c = editorSvg(MEASURE, TURN, NOW, FABLE, 'C').svg
-  expect(a).toContain('linear infinite')
-  expect(bFresh).toContain('linear 1"')
-  expect(bFresh).not.toContain('infinite')
-  // The webview reads `animation:` as a moving picture and draws it frame by frame
-  for (const still of [bStill, c]) expect(still).not.toMatch(/<animate|animation(?:-[a-z-]{1,24})?\s*:(?!\s*none\b)/)
+test('the shine crosses once after a change, then the markup carries no animation', async () => {
+  const fresh = editorSvg(MEASURE, TURN, NOW, FABLE, true).svg
+  const still = editorSvg(MEASURE, TURN, NOW, FABLE, false).svg
+  expect(fresh).toContain('linear 1"')
+  expect(fresh).not.toContain('infinite')
   // Motion stops under prefers-reduced-motion (CHECKLIST #13)
-  for (const moving of [a, bFresh]) expect(moving).toContain('@media (prefers-reduced-motion:reduce){.sh{animation:none!important}}')
-  // A tints the figures; B and C draw them in the text color
-  expect(figuresOf(a).length).toBeGreaterThan(0)
-  expect(bStill).not.toMatch(/class="n" style=/)
-  // C's bars and dots are the one accent (savvy-progress's band); B's keep each metric's hue (7d, Fable, context)
-  const hues = (s: string) => new Set(barsOf(s).map(b => b.h))
-  expect(hues(c).size).toBe(1)
-  expect(hues(bStill).size).toBe(3)
-  // A's motion can be set apart from its hues: once, as B's
-  expect(editorSvg(MEASURE, TURN, NOW, FABLE, 'A', true, 'once').svg).toContain('linear 1"')
-  expect(editorSvg(MEASURE, TURN, NOW, FABLE, 'A', false, 'once').svg).not.toContain('animation:s')
+  expect(fresh).toContain('@media (prefers-reduced-motion:reduce){.sh{animation:none!important}}')
+  // The webview reads `animation:` as a moving picture and draws it frame by frame
+  expect(still).not.toMatch(/<animate|animation(?:-[a-z-]{1,24})?\s*:(?!\s*none\b)/)
+  // Each metric keeps its own hue on its figure and bar (7d, Fable, context; the cache has no bar)
+  expect(new Set(figuresOf(still).map(f => f.h)).size).toBe(4)
+  expect(new Set(barsOf(still).map(b => b.h)).size).toBe(3)
 })
 
-test('a metric in trouble turns its figure and bar red in every look', async () => {
+test('in VS Code the shine is due for 3 seconds after what the row shows changes', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, new Map<string, unknown>([['welcomed', true]]), () => ({ status: 200, text: body() }))
+  await $.session.start(START)
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'vscode', ...BAND })
+  expect(String((await ui.find({ type: 'Svg' }))?.props.source)).toContain('animation:s')
+  await clock.advance(3_000)
+  await clock.settle()
+  expect(String((await ui.find({ type: 'Svg' }))?.props.source)).not.toContain('animation:s')
+  await ui.unmount()
+})
+
+test('a metric in trouble turns its figure and bar red', async () => {
   const hot: Measure = { ...MEASURE, rateLimits: [{ kind: 'seven_day', percentUsed: 85, resetsAt: RESET }] }
-  const red = oklch('#e5685f')[2].toFixed(3)
-  for (const look of EDITOR_LOOKS) {
-    const { svg } = editorSvg(hot, TURN, NOW, [], look)
-    expect(figuresOf(svg).some(f => f.h === +red)).toBe(true)
-    expect(barsOf(svg).some(b => b.h === +red)).toBe(true)
-  }
+  const red = +oklch('#e5685f')[2].toFixed(3)
+  const { svg } = editorSvg(hot, TURN, NOW, [])
+  expect(figuresOf(svg).some(f => f.h === red)).toBe(true)
+  expect(barsOf(svg).some(b => b.h === red)).toBe(true)
 })
 
 // The colors the webview works out, against VS Code's themes: the preview's light and dark, and
@@ -239,36 +236,34 @@ const THEMES = [
 const step = (l: number) => Math.max(0, Math.min(1, (0.7 - l) * 10))
 
 test('figures keep 4.5:1 and bars 3:1, against the background and their track, in every theme', async () => {
-  for (const look of EDITOR_LOOKS) {
-    const hot: Measure = { ...MEASURE, rateLimits: [{ kind: 'seven_day', percentUsed: 85, resetsAt: RESET }] }
-    const svg = editorSvg(MEASURE, TURN, NOW, FABLE, look).svg + editorSvg(hot, { ...TURN, cacheRead: 100 }, NOW, FABLE, look).svg
-    const figures = figuresOf(svg)
-    const bars = barsOf(svg)
-    expect(figures.length).toBeGreaterThan(0) // A's, and every look's red ones
-    expect(bars.length).toBeGreaterThan(0)
-    for (const { text, bg } of THEMES) {
-      const l = oklch(text)[0]
-      const s = step(l)
-      for (const f of figures) {
-        const hex = oklchHex(l + s * (f.lightL - l), 0.09 + s * (f.lightC - 0.09), f.h)
-        expect(contrast(hex, bg)).toBeGreaterThanOrEqual(4.5)
-      }
-      for (const b of bars) {
-        const dark = 0.3 + 0.5 * l
-        const fill = oklchHex(dark + s * (b.lightL - dark), b.darkC + s * (b.lightC - b.darkC), b.h)
-        expect(contrast(fill, bg)).toBeGreaterThanOrEqual(3)
-        // The track is the fill at 22% over the background
-        expect(contrast(fill, over(fill, bg, 0.22))).toBeGreaterThanOrEqual(3)
-      }
-      // Muted text: currentColor mixed a quarter toward grey
-      expect(contrast(over(text, '#888888', 0.75), bg)).toBeGreaterThanOrEqual(4.5)
+  const hot: Measure = { ...MEASURE, rateLimits: [{ kind: 'seven_day', percentUsed: 85, resetsAt: RESET }] }
+  const svg = editorSvg(MEASURE, TURN, NOW, FABLE).svg + editorSvg(hot, { ...TURN, cacheRead: 100 }, NOW, FABLE).svg
+  const figures = figuresOf(svg)
+  const bars = barsOf(svg)
+  expect(figures.length).toBeGreaterThan(0)
+  expect(bars.length).toBeGreaterThan(0)
+  for (const { text, bg } of THEMES) {
+    const l = oklch(text)[0]
+    const s = step(l)
+    for (const f of figures) {
+      const hex = oklchHex(l + s * (f.lightL - l), 0.09 + s * (f.lightC - 0.09), f.h)
+      expect(contrast(hex, bg)).toBeGreaterThanOrEqual(4.5)
     }
+    for (const b of bars) {
+      const dark = 0.3 + 0.5 * l
+      const fill = oklchHex(dark + s * (b.lightL - dark), b.darkC + s * (b.lightC - b.darkC), b.h)
+      expect(contrast(fill, bg)).toBeGreaterThanOrEqual(3)
+      // The track is the fill at 22% over the background
+      expect(contrast(fill, over(fill, bg, 0.22))).toBeGreaterThanOrEqual(3)
+    }
+    // Muted text: currentColor mixed a quarter toward grey
+    expect(contrast(over(text, '#888888', 0.75), bg)).toBeGreaterThanOrEqual(4.5)
   }
 })
 
 test('in a light theme each hue keeps its own color, not a brown or grey near the text', async () => {
   // The light-theme figures, by hue: far enough apart that 7d, Fable, the context and the cache read as four colors
-  const svg = editorSvg(MEASURE, TURN, NOW, FABLE, 'A').svg
+  const svg = editorSvg(MEASURE, TURN, NOW, FABLE).svg
   const seen = new Map(figuresOf(svg).map(f => [f.h, f] as const))
   expect(seen.size).toBe(4)
   for (const f of seen.values()) expect(f.lightC).toBeGreaterThanOrEqual(0.11)

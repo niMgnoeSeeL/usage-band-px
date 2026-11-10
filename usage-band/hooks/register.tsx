@@ -460,11 +460,8 @@ export const pollScoped = async ($: EngineInterface): Promise<void> => {
 // currentColor, which is the theme's text color, light or dark. It holds every detail tier laid
 // out in full, and a width media query, which inside the image reads the width the webview gives
 // it, shows the richest tier that fits on one line: bars and reset times, then bars, then short
-// bars, then the figures alone.
-
-export type EditorLook = 'A' | 'B' | 'C'
-export const EDITOR_LOOKS: readonly EditorLook[] = ['A', 'B', 'C']
-export const editorLookOf = (v: unknown): EditorLook => (EDITOR_LOOKS.includes(v as EditorLook) ? (v as EditorLook) : 'A')
+// bars, then the figures alone. Each metric keeps upstream's hue on its label, figure, bar and
+// icon; a metric in trouble (a limit or the context past 80%, a hit rate under 50%) turns red.
 
 // The row's markup height and its ink: the cap band (the figures' cap and ascender height, which
 // the icons, bars and dots are sized to) runs EC.top to EC.top + EC.h, in the middle of the markup
@@ -590,9 +587,6 @@ const barColor = (hue: string) => {
   return `oklch(from currentColor ${stepped(`${DARK.barL0} + ${DARK.barK} * l`, bar.L)} ${stepped(String(r3(Math.min(c, DARK.barC))), bar.C)} ${r3(h)})`
 }
 
-// The box's one accent (savvy-progress's band) for look C
-const ACCENT = '#8f8cf4'
-
 type EMetric =
   | { kind: 'limit'; id: string; label: string; pct: number; left: string; hue: string; alt: string }
   | { kind: 'ctx'; tokens: string; window: string; pct: number; hue: string; alt: string }
@@ -619,41 +613,22 @@ export const editorMetrics = (m: Measure | null, t: TurnTokens | null, at: numbe
   return out
 }
 
-export type Shine = 'always' | 'once' | 'none'
-type Paint = { figure: (hue: string) => string; label: (hue: string) => string; bar: (hue: string) => string; icon: (hue: string) => string }
-
-// A: upstream's look, every figure and label tinted with its metric's hue, bars and icons in it
-// B: the hues on the bars, dots and icons only; figures in the text color, labels muted
-// C: one accent: bars and dots in the box's accent, icons muted, figures in the text color.
-// In every look a metric in trouble (a limit or the context past 80%, a hit rate under 50%) turns
-// its figure and its bar red.
-const PAINT: Record<EditorLook, Paint> = {
-  A: { figure: figureFill, label: figureFill, bar: barColor, icon: barColor },
-  B: { figure: h => (h === RED ? figureFill(h) : ''), label: () => '', bar: barColor, icon: barColor },
-  C: { figure: h => (h === RED ? figureFill(h) : ''), label: () => '', bar: h => barColor(h === RED ? RED : ACCENT), icon: () => '' },
-}
-export const SHINE: Record<EditorLook, Shine> = { A: 'always', B: 'once', C: 'none' }
-// `options.motion` (`loop`, `once` or `none`) overrides a look's shine, for the layout preview
-export const shineOf = (look: EditorLook, motion: unknown): Shine =>
-  motion === 'loop' ? 'always' : motion === 'once' ? 'once' : motion === 'none' ? 'none' : SHINE[look]
-
 const SHINE_W = 18
 const MUTE = 'color-mix(in srgb,currentColor 75%,#888)'
 
 // One tier's groups, laid out from x = 1; its width, and its markup in two layers (type, and the
 // bars and dots with their shine)
-const editorTier = (ms: EMetric[], tier: Tier, ti: number, look: EditorLook, shine: Shine) => {
-  const p = PAINT[look]
-  const fig = (hue: string, x: number, v: string, cls = 'n') =>
-    `<text x="${r3(x)}" y="${EBASE}" textLength="${r3(eTextW(v))}" lengthAdjust="spacing" class="${cls}"${p.figure(hue) ? ` style="${p.figure(hue)}"` : ''}>${esc(v)}</text>`
-  const lab = (hue: string, x: number, v: string) =>
-    `<text x="${r3(x)}" y="${EBASE}" textLength="${r3(eTextW(v))}" lengthAdjust="spacing" class="${p.label(hue) ? 'n' : 'm'}"${p.label(hue) ? ` style="${p.label(hue)}"` : ''}>${esc(v)}</text>`
+const editorTier = (ms: EMetric[], tier: Tier, ti: number, shines: boolean) => {
+  const fig = (hue: string, x: number, v: string) =>
+    `<text x="${r3(x)}" y="${EBASE}" textLength="${r3(eTextW(v))}" lengthAdjust="spacing" class="n" style="${figureFill(hue)}">${esc(v)}</text>`
+  const lab = fig
   const mute = (x: number, v: string) =>
     `<text x="${r3(x)}" y="${EBASE}" textLength="${r3(eTextW(v))}" lengthAdjust="spacing" class="m">${esc(v)}</text>`
-  const paintBar = (hue: string) => `fill:${p.bar(hue)}`
+  const paintBar = (hue: string) => `fill:${barColor(hue)}`
   const iconAt = (x: number, hue: string, body: string) =>
-    `<g class="ic" transform="translate(${r3(x)} ${EC.top})"${p.icon(hue) ? ` style="color:${p.icon(hue)}"` : ''}>${body}</g>`
-  const anim = (dist: number) => (shine === 'none' ? '' : ` style="animation:s${dist} 2.6s linear ${shine === 'always' ? 'infinite' : '1'}"`)
+    `<g class="ic" transform="translate(${r3(x)} ${EC.top})" style="color:${barColor(hue)}">${body}</g>`
+  // The shine crosses once; the markup drawn after it carries no animation
+  const anim = (dist: number) => ` style="animation:s${dist} 2.6s linear 1"`
   const used = new Set<number>()
   let x = 1
   const parts: string[] = []
@@ -673,7 +648,7 @@ const editorTier = (ms: EMetric[], tier: Tier, ti: number, look: EditorLook, shi
           `<rect ${bar} width="${tier.bar}" class="trk" style="${paintBar(mt.hue)}"/>`,
           `<rect ${bar} width="${r3(fw)}" class="bar" style="${paintBar(mt.hue)}"/>`,
         )
-        if (shine !== 'none' && fw > 0) {
+        if (shines && fw > 0) {
           used.add(tier.bar + SHINE_W)
           parts.push(
             `<clipPath id="c${id}"><rect ${bar} width="${r3(fw)}"/></clipPath>`,
@@ -704,7 +679,7 @@ const editorTier = (ms: EMetric[], tier: Tier, ti: number, look: EditorLook, shi
         const off = Array.from({ length: EDOT.cols * 2 - lit }, (_, i) => dot(lit + i)).join('')
         const mw = EDOT.cols * EDOT.pitch
         parts.push(`<g class="trk" style="${paintBar(mt.hue)}">${off}</g>`, `<g class="bar" style="${paintBar(mt.hue)}">${on}</g>`)
-        if (shine !== 'none' && lit > 0) {
+        if (shines && lit > 0) {
           used.add(mw + SHINE_W)
           parts.push(
             `<clipPath id="c${id}">${on}</clipPath>`,
@@ -738,11 +713,10 @@ const TARGET_ICON =
   `<circle cx="5" cy="5" r="4.4"/><circle cx="5" cy="5" r="2.1"/><circle cx="5" cy="5" r="0.7" fill="currentColor"/></g>`
 
 // The markup: width 100% and no viewBox, so the webview draws it at the row's width and nothing
-// in it scales (CHECKLIST #3). `fresh` is whether look B's single shine is still due.
-export const editorSvg = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[], look: EditorLook, fresh = true, motion: Shine = SHINE[look]) => {
+// in it scales (CHECKLIST #3). `fresh` is whether the single shine after a change is still due.
+export const editorSvg = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[], fresh = true) => {
   const ms = editorMetrics(m, t, at, models)
-  const shine: Shine = motion === 'once' && !fresh ? 'none' : motion
-  const tiers = TIERS.map((tier, i) => editorTier(ms, tier, i, look, shine))
+  const tiers = TIERS.map((tier, i) => editorTier(ms, tier, i, fresh))
   // Tier i shows from its own width up to the next richer tier's; the last shows below that too
   const show = tiers
     .map((tr, i) => (i === 0 ? '' : `@media (max-width:${tiers[i - 1]!.width - 0.02}px){.v${i - 1}{display:none}.v${i}{display:inline}}`))
@@ -758,9 +732,9 @@ export const editorSvg = (m: Measure | null, t: TurnTokens | null, at: number, m
     tiers.map((_, i) => (i === 0 ? '' : `.v${i}`)).filter(Boolean).join(',') + `{display:none}` +
     show +
     keys +
-    (shine === 'none' ? '' : `@media (prefers-reduced-motion:reduce){.sh{animation:none!important}}`)
+    (fresh ? `@media (prefers-reduced-motion:reduce){.sh{animation:none!important}}` : '')
   const defs =
-    shine === 'none'
+    !fresh
       ? ''
       : `<defs><linearGradient id="shine" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/>` +
         `<stop offset=".5" stop-color="#fff" stop-opacity=".8"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>`
@@ -829,12 +803,10 @@ export const endsSpaced = (node: unknown) => spaced(node, 'bottom')
 const shown = (m: Measure | null, t: TurnTokens | null, at: number, s: ScopedReading | null) =>
   desktopSvg(m, t, at, modelsAt(s, at)).svg
 
-// A single shine (look B's, or `motion: once`) crosses once after what the row shows changes,
-// then the markup carries no animation, so the webview stops drawing it frame by frame
+// In VS Code the shine crosses once after what the row shows changes, then the markup carries no
+// animation, so the webview stops drawing it frame by frame
 const SWEEP_MS = 3_000
-let sweepShine: Shine = 'none'
 const swept = async ($: EngineInterface) => {
-  if (sweepShine !== 'once') return
   await update($, sweep, () => true)
   $.clock.after(SWEEP_MS, () => {
     void update($, sweep, () => false)
@@ -899,13 +871,8 @@ export const WELCOME =
   'usage-band is on: your 5h and 7d limits, context window and cache hit rate now show above the prompt. ' +
   'The limits fill in after Claude’s first reply.'
 
-// `options.look` picks the VS Code look (A, B or C) and `options.motion` its shine, for the layout
-// preview, which passes them; the plugin declares neither option, so a session gets the defaults.
-export const register: Register = (on, options) => {
+export const register: Register = on => {
   let setting = 'auto'
-  const look = editorLookOf((options as Record<string, unknown> | undefined)?.look)
-  const motion = shineOf(look, (options as Record<string, unknown> | undefined)?.motion)
-  sweepShine = motion
   // The terminal animates by redrawing; started by its first draw, so a session without a terminal
   // never runs it. A reload drops the timer and this flag together.
   let isAnimating = false
@@ -1008,7 +975,7 @@ export const register: Register = (on, options) => {
     if (e.surface === 'vscode') {
       const { Svg } = $.ui.resolve(e)
       const fresh = await read($, sweep)
-      const { svg } = editorSvg(m, t, at, models, look, fresh, motion)
+      const { svg } = editorSvg(m, t, at, models, fresh)
       row = (
         <Box flexDirection="row" flexWrap="nowrap">
           <Box flexDirection="column" width={0} flexGrow={1} minWidth={0}>
