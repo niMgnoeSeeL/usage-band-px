@@ -1,6 +1,6 @@
-## Local fork changes (1.0.6-px.1)
+## Local fork changes (1.0.6-px.2)
 
-This is `usage-band-px`, a local fork of usage-band 1.0.6. It draws the band in VS Code's box above the prompt, to the shared box's contract in `claude-mod/layout/ABOVE-PROMPT.md` (C1 and C2). It also adds each per-model weekly window (Fable's) beside the 7-day one. The terminal and the desktop keep upstream's look, apart from the stacking and the per-model window.
+This is `usage-band-px`, a local fork of usage-band 1.0.6. It draws the band in VS Code's box above the prompt, to the shared box's contract in `claude-mod/layout/ABOVE-PROMPT.md` (C1 and C2). It also adds each per-model weekly window (Fable's) beside the 7-day one. The desktop keeps upstream's look, apart from the stacking and the per-model window; the terminal keeps it too, with its line taking the slot's width.
 
 - **VS Code draws the desktop's look**, not the terminal's text: one Svg that fills the row (`width="100%"`, no viewBox, 13px high), in a column Box inside a nowrap row.
   - It holds five detail tiers, each laid out in full. A width media query shows the richest that fits on one line: bars with reset times, bars, short bars, figures alone, and figures without the context icon (fits a 280px panel).
@@ -16,6 +16,7 @@ This is `usage-band-px`, a local fork of usage-band 1.0.6. It draws the band in 
   - Muted text is `currentColor` mixed a quarter toward grey (4.8:1 and up).
   - The shine crosses once (2.6s) after what the row shows changes. For 3 seconds the markup carries a CSS animation, which stops under `prefers-reduced-motion`. After that it carries none, so the webview stops drawing it frame by frame.
   - The terminal's 200ms redraw timer does not run in VS Code.
+- **The terminal's line takes the slot's width** (`bodyColumns`, less the row's 1-cell padding on each side). At the bars tier every bar lengthens by the same whole number of cells, so the bars stay comparable, and the few cells left over widen the last gap. Narrower, it falls back through upstream's tiers (no bars, then bare figures). Claude Code's own `[-]` (collapse the band) sits right of `bodyColumns`, over the slot's last 5 cells, so the line never reaches it (measured in a live terminal: the line ends 2 cells left of it).
 - **Per-model weekly windows** come from `https://api.anthropic.com/api/oauth/usage`, the endpoint Claude Code's `/usage` reads, through `$.session.authorize()` and `$.http.fetch(url, { auth })`. Neither `$.session.usage()` nor `session.measure` carries them.
   - The answer's `limits` rows of kind `weekly_scoped` give the label (`scope.model.display_name`), `percent` and `resets_at`. The `model_scoped` shape that Claude Code's SDK projects them to is read too.
   - It asks at most once per 5 minutes across all open sessions. The time of the last attempt (`scoped-tried`) and the reading (`scoped`) are shared through `$.store`.
