@@ -5,6 +5,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import {
   SCOPED_EVERY_MS,
   SCOPED_URL,
+  COLLAPSE_CELLS,
+  fit,
   LEFT_X,
   SPACE,
   contrast,
@@ -14,6 +16,7 @@ import {
   oklchHex,
   over,
   parseScoped,
+  width,
 } from '../hooks/register'
 import type { Measure, TurnTokens } from '../types'
 
@@ -367,4 +370,33 @@ test('a tier with no bars widens its gaps instead, the hairline at each gap\'s m
 test('the first group starts at LEFT_X, so its ink starts where the band and the fold row do', async () => {
   const svg = editorSvg(MEASURE, TURN, NOW, FABLE, false).svg
   expect(svg).toContain(`<g class="v0"><text x="${LEFT_X}" `)
+})
+
+// ---- The terminal line takes the band's width
+
+test('in the terminal every bar lengthens by the same whole cells, so the line fills its width', async () => {
+  const look = { style: 'unicode', colors: 'true' } as const
+  for (const cols of [70, 90, 113]) {
+    const spans = fit(MEASURE, TURN, NOW, cols, 0, look, FABLE)
+    expect(width(spans)).toBe(cols)
+    // two bars, the same length
+    const runs = spans.map(s => s.text).join('').match(/■+/g) ?? []
+    expect(runs.length).toBe(2)
+    expect(runs[0]!.length).toBe(runs[1]!.length)
+    expect(runs[0]!.length).toBeGreaterThanOrEqual(8)
+  }
+  // Too narrow for bars: the next detail, as before
+  expect(fit(MEASURE, TURN, NOW, 50, 0, look, FABLE).map(s => s.text).join('')).not.toContain('■')
+})
+
+test('the terminal line leaves Claude Code\'s `[-]` its cells', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, new Map<string, unknown>([['welcomed', true]]), () => ({ status: 200, text: body() }))
+  await $.session.start(START)
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 120 } as never })
+  const texts = ((await ui.findAll({ type: 'Text' })) as { children?: unknown[] }[]).map(t => (t.children ?? []).join('')).join('')
+  // paddingX 1 on each side, then COLLAPSE_CELLS
+  expect([...texts].length).toBe(120 - 2 - COLLAPSE_CELLS)
+  await ui.unmount()
 })

@@ -111,6 +111,7 @@ export const layout = (
   frame = 0,
   look: Look = { style: 'unicode', colors: 'true' },
   models: Scoped[] = [],
+  cells = 8,
 ): Span[] => {
   const g = GLYPHS[look.style]
   const groups: Span[][] = []
@@ -120,7 +121,7 @@ export const layout = (
     const pct = Math.round(l.percentUsed)
     const color = pct >= 80 ? RED : hue
     const out: Span[] = [{ text: `${label} `, color }]
-    if (detail === 2) out.push(...bar(pct, 8, color, frame, look.style), { text: ' ' })
+    if (detail === 2) out.push(...bar(pct, cells, color, frame, look.style), { text: ' ' })
     out.push({ text: `${pct}%`, color })
     if (detail >= 1 && l.resetsAt) out.push({ text: ` · ${fmtLeft(Date.parse(l.resetsAt) - at)}`, dim: true })
     groups.push(out)
@@ -152,9 +153,29 @@ export const layout = (
   return look.colors === '256' ? spans.map(s => (s.color ? { ...s, color: to256(s.color) } : s)) : spans
 }
 
-const fit = (m: Measure | null, t: TurnTokens | null, at: number, cols: number, frame: number, look: Look, models: Scoped[]) =>
-  ([2, 1, 0] as const).map(d => layout(m, t, at, d, frame, look, models)).find(s => width(s) <= cols) ??
-  layout(m, t, at, 0, frame, look, models)
+// Where Claude Code draws its own `[-]` (collapse the band) over the band's first line: 3 cells and 1 to the right
+// edge. The usage row is that line whenever no band is above it, so it always leaves these cells, and one between.
+export const COLLAPSE_CELLS = 5
+
+// The terminal line: the richest detail that fits `cols` cells. With bars, the line takes all of them: every bar
+// lengthens by the same whole number of cells, so bars stay comparable, and the cells left over (fewer than the bars)
+// widen the last gap.
+export const fit = (m: Measure | null, t: TurnTokens | null, at: number, cols: number, frame: number, look: Look, models: Scoped[]): Span[] => {
+  const base = layout(m, t, at, 2, frame, look, models)
+  if (width(base) <= cols) {
+    // One bar per limit the line shows: the 5-hour and 7-day windows, and each per-model one
+    const bars = ['five_hour', 'seven_day'].filter(k => m?.rateLimits.some(l => l.kind === k)).length + models.length
+    if (bars === 0) return base
+    const extra = cols - width(base)
+    const grown = layout(m, t, at, 2, frame, look, models, 8 + Math.floor(extra / bars))
+    const left = cols - width(grown)
+    const last = grown.lastIndexOf(SEP)
+    if (left > 0 && last >= 0) grown[last] = { text: SEP.text + ' '.repeat(left) }
+    return grown
+  }
+  return ([1, 0] as const).map(d => layout(m, t, at, d, frame, look, models)).find(s => width(s) <= cols) ??
+    layout(m, t, at, 0, frame, look, models)
+}
 
 
 // ---- Desktop: the band is one SVG drawn as a plain image. The SMIL shine runs in an image too,
@@ -1045,7 +1066,7 @@ export const register: Register = on => {
       const frame = await read($, phase)
       // The terminal font decides icons
       const s = await read($, style)
-      const spans = fit(m, t, at, e.props.bodyColumns - 2, frame, { style: s, colors: 'true' }, models)
+      const spans = fit(m, t, at, e.props.bodyColumns - 2 - COLLAPSE_CELLS, frame, { style: s, colors: 'true' }, models)
       const { Text } = $.ui.resolve(e)
       row = (
         <Box flexDirection="row" flexWrap="wrap" paddingX={1}>
