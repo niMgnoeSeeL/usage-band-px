@@ -1,16 +1,18 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Limit, Measure, Style, TurnTokens } from '../types'
+import type { Limit, Measure, Scoped, ScopedReading, Style, TurnTokens } from '../types'
 
 const measure = atom({ plugin: 'usage-band', key: 'measure' } as const, null)
 const turn = atom({ plugin: 'usage-band', key: 'turn' } as const, null)
 const now = atom({ plugin: 'usage-band', key: 'now' } as const, 0)
 const phase = atom({ plugin: 'usage-band', key: 'phase' } as const, 0)
 const style = atom({ plugin: 'usage-band', key: 'style' } as const, 'unicode')
+const scoped = atom({ plugin: 'usage-band', key: 'scoped' } as const, null)
+const sweep = atom({ plugin: 'usage-band', key: 'sweep' } as const, false)
 
 // One hue per metric; RED takes over only when a metric is in trouble
-const HUE = { five: '#5cc4d6', seven: '#e8a25f', ctx: '#9aa5f5', cache: '#72cf9f' }
+const HUE = { five: '#5cc4d6', seven: '#e8a25f', ctx: '#9aa5f5', cache: '#72cf9f', model: '#d78bd0' }
 const RED = '#e5685f'
 const TRACK = '#4a4f5c'
 const FRAME_MS = 200
@@ -73,6 +75,9 @@ export const to256 = (hex: string): string => {
   return `#${pick.map(v => v.toString(16).padStart(2, '0')).join('')}`
 }
 
+// A window as a bar draws it: the engine's limits and the per-model windows alike
+type Window = Pick<Limit, 'percentUsed' | 'resetsAt'>
+
 export type Span = { text: string; color?: string; dim?: boolean }
 export type Look = { style: Style; colors: 'true' | '256' }
 
@@ -105,11 +110,12 @@ export const layout = (
   detail: 0 | 1 | 2,
   frame = 0,
   look: Look = { style: 'unicode', colors: 'true' },
+  models: Scoped[] = [],
 ): Span[] => {
   const g = GLYPHS[look.style]
   const groups: Span[][] = []
 
-  const limit = (label: string, l: Limit | undefined, hue: string) => {
+  const limit = (label: string, l: Window | undefined, hue: string) => {
     if (!l) return
     const pct = Math.round(l.percentUsed)
     const color = pct >= 80 ? RED : hue
@@ -121,6 +127,7 @@ export const layout = (
   }
   limit('5h', m?.rateLimits.find(l => l.kind === 'five_hour'), HUE.five)
   limit('7d', m?.rateLimits.find(l => l.kind === 'seven_day'), HUE.seven)
+  for (const s of models) limit(s.label, s, HUE.model)
 
   if (m) {
     const pct = m.context.percent ?? 0
@@ -145,9 +152,9 @@ export const layout = (
   return look.colors === '256' ? spans.map(s => (s.color ? { ...s, color: to256(s.color) } : s)) : spans
 }
 
-const fit = (m: Measure | null, t: TurnTokens | null, at: number, cols: number, frame: number, look: Look) =>
-  ([2, 1, 0] as const).map(d => layout(m, t, at, d, frame, look)).find(s => width(s) <= cols) ??
-  layout(m, t, at, 0, frame, look)
+const fit = (m: Measure | null, t: TurnTokens | null, at: number, cols: number, frame: number, look: Look, models: Scoped[]) =>
+  ([2, 1, 0] as const).map(d => layout(m, t, at, d, frame, look, models)).find(s => width(s) <= cols) ??
+  layout(m, t, at, 0, frame, look, models)
 
 
 // ---- Desktop: the band is one SVG drawn as a plain image. The SMIL shine runs in an image too,
@@ -183,7 +190,7 @@ type Group = { width: number; draw: (x: number) => Layers }
 
 // 5h 60% ▬▬▬▬── 1h49m: the figure first, so the state reads before the bar
 // 5h ▬▬▬▬▬▬──── 69% │ 1h31m: label, bar, figure, then when it resets
-const limitGroup = (id: string, label: string, l: Limit, hue: string, at: number): Group => {
+const limitGroup = (id: string, label: string, l: Window, hue: string, at: number): Group => {
   const pct = Math.round(l.percentUsed)
   const color = pct >= 80 ? RED : hue
   const pctText = `${pct}%`
@@ -306,12 +313,15 @@ const wrap = (width: number, body: string) =>
 
 export type Part = Layers & { width: number; alt: string }
 
-export const desktopParts = (m: Measure | null, t: TurnTokens | null, at: number): Part[] => {
+export const desktopParts = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[] = []): Part[] => {
   const groups: { g: Group; alt: string }[] = []
   const five = m?.rateLimits.find(l => l.kind === 'five_hour')
   const seven = m?.rateLimits.find(l => l.kind === 'seven_day')
   if (five) groups.push({ g: limitGroup('5h', '5h', five, HUE.five, at), alt: `5-hour limit ${Math.round(five.percentUsed)}% used` })
   if (seven) groups.push({ g: limitGroup('7d', '7d', seven, HUE.seven, at), alt: `7-day limit ${Math.round(seven.percentUsed)}% used` })
+  models.forEach((s, i) =>
+    groups.push({ g: limitGroup(`m${i}`, s.label, s, HUE.model, at), alt: `${s.label} 7-day limit ${Math.round(s.percentUsed)}% used` }),
+  )
   if (m) {
     const pct = m.context.percent ?? 0
     groups.push({
@@ -329,10 +339,10 @@ export const desktopParts = (m: Measure | null, t: TurnTokens | null, at: number
 
 // One SVG for the whole band, so every shine runs on the same clock. Groups sit D.gap apart
 // with a hairline centred in each gap; the one inside a limit group is shorter and fainter.
-export const desktopSvg = (m: Measure | null, t: TurnTokens | null, at: number) => {
+export const desktopSvg = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[] = []) => {
   let x = 0
   const body: string[] = []
-  desktopParts(m, t, at).forEach((p, i) => {
+  desktopParts(m, t, at, models).forEach((p, i) => {
     if (i > 0) body.push(`<rect x="${Math.round(x - D.gap / 2)}" y="7" width="1" height="16" class="sep"/>`)
     body.push(`<g transform="translate(${x} 0)">${p.stat}${p.motion}</g>`)
     x += p.width + D.gap
@@ -341,40 +351,463 @@ export const desktopSvg = (m: Measure | null, t: TurnTokens | null, at: number) 
   return { svg: wrap(width, body.join('')), width, height: D.h }
 }
 
-export const describe = (m: Measure | null, t: TurnTokens | null) => {
+export const describe = (m: Measure | null, t: TurnTokens | null, models: Scoped[] = []) => {
   const parts: string[] = []
   for (const l of m?.rateLimits ?? []) {
     if (l.kind === 'five_hour') parts.push(`5-hour limit ${Math.round(l.percentUsed)}% used`)
     if (l.kind === 'seven_day') parts.push(`7-day limit ${Math.round(l.percentUsed)}% used`)
   }
+  for (const s of models) parts.push(`${s.label} 7-day limit ${Math.round(s.percentUsed)}% used`)
   if (m) parts.push(`context ${fmtTokens(m.context.tokens ?? 0)} of ${fmtTokens(m.context.window)}`)
   const hit = t ? hitRate(t) : null
   if (hit !== null) parts.push(`cache hit ${hit}%`)
   return parts.join(', ')
 }
 
+// ---- Per-model weekly windows (Fable's, for one). Neither `$.session.usage()` nor
+// `session.measure` carries them; the usage endpoint that Claude Code's own /usage screen reads
+// does, in its `limits` list as `weekly_scoped` rows scoped to a model. It is asked at most once
+// per SCOPED_EVERY_MS across every open session: the sessions share the reading and the time of
+// the last attempt through `$.store`.
+
+export const SCOPED_URL = 'https://api.anthropic.com/api/oauth/usage'
+export const SCOPED_EVERY_MS = 5 * 60_000
+// A reading this old says nothing current (the endpoint has failed for half an hour), so it is
+// no longer drawn
+export const SCOPED_STALE_MS = 30 * 60_000
+export const SCOPED_KEY = 'scoped'
+export const SCOPED_TRIED_KEY = 'scoped-tried'
+
+const isoOf = (v: unknown): string | undefined => {
+  // The endpoint answers ISO 8601; a rate-limit header's epoch seconds are read too
+  const ms = typeof v === 'number' ? v * 1000 : typeof v === 'string' ? Date.parse(v) : NaN
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined
+}
+
+// The per-model weekly windows in an answer of the usage endpoint: its `limits` rows of kind
+// `weekly_scoped` (`percent`, `resets_at`, `scope.model.display_name`), or, in the shape Claude
+// Code's SDK projects them to, `model_scoped` (`display_name`, `utilization`, `resets_at`).
+// An empty list for an account with none; null for an answer in neither shape.
+export const parseScoped = (body: unknown): Scoped[] | null => {
+  if (typeof body !== 'object' || body === null) return null
+  const { limits, model_scoped } = body as { limits?: unknown; model_scoped?: unknown }
+  const out: Scoped[] = []
+  const add = (label: unknown, pct: unknown, reset: unknown) => {
+    if (typeof label !== 'string' || label.trim() === '' || typeof pct !== 'number' || !Number.isFinite(pct)) return
+    const resetsAt = isoOf(reset)
+    out.push({ label: label.trim(), percentUsed: pct, ...(resetsAt && { resetsAt }) })
+  }
+  if (Array.isArray(limits)) {
+    for (const l of limits as { kind?: unknown; percent?: unknown; resets_at?: unknown; scope?: { model?: { display_name?: unknown } | null } | null }[]) {
+      if (l?.kind === 'weekly_scoped') add(l.scope?.model?.display_name, l.percent, l.resets_at)
+    }
+    return out
+  }
+  if (Array.isArray(model_scoped)) {
+    for (const l of model_scoped as { display_name?: unknown; utilization?: unknown; resets_at?: unknown }[]) add(l?.display_name, l?.utilization, l?.resets_at)
+    return out
+  }
+  return null
+}
+
+const asReading = (v: unknown): ScopedReading | null => {
+  const r = v as ScopedReading | null
+  return r !== null && typeof r === 'object' && typeof r.at === 'number' && Array.isArray(r.limits) ? r : null
+}
+
+// The windows a reading draws at `at`: none from a stale reading, and none whose window has reset
+// since it was read (the next reading says where the new window stands)
+export const modelsAt = (r: ScopedReading | null, at: number): Scoped[] => {
+  if (!r || at - r.at > SCOPED_STALE_MS) return []
+  return r.limits.filter(l => !l.resetsAt || Date.parse(l.resetsAt) > at)
+}
+
+// Asks the endpoint when the shared attempt is due, and takes what it answers; otherwise takes the
+// reading another session shared. A session with no first-party login, a refused request or an
+// answer in another shape keeps the reading it has. The attempt's time is written before the
+// request, so the sessions that tick meanwhile wait out the same five minutes.
+export const pollScoped = async ($: EngineInterface): Promise<void> => {
+  const at = await $.clock.now()
+  const tried = await $.store.get(SCOPED_TRIED_KEY)
+  const due = !(typeof tried === 'number' && tried <= at && at - tried < SCOPED_EVERY_MS)
+  if (due) {
+    try {
+      const auth = await $.session.authorize()
+      if (auth) {
+        await $.store.set(SCOPED_TRIED_KEY, at)
+        const res = await $.http.fetch(SCOPED_URL, { auth: auth.handle })
+        const limits = res.ok ? parseScoped(JSON.parse(res.text)) : null
+        if (limits) {
+          const reading = { at, limits }
+          await $.store.set(SCOPED_KEY, reading)
+          await setScoped($, reading)
+          return
+        }
+      }
+    } catch {
+      // The next attempt is five minutes away
+    }
+  }
+  const shared = asReading(await $.store.get(SCOPED_KEY))
+  if (shared) await setScoped($, shared)
+}
+
+// ---- VS Code: the desktop's look, in one SVG that fills the row of the box above the prompt
+// (layout/ABOVE-PROMPT.md). The webview draws an Svg as an image in a sandboxed frame and hands the
+// markup the theme's text color as `color`. Inside that frame `prefers-color-scheme` follows the
+// operating system, not the editor's theme (VS Code's `window.systemColorTheme` defaults to the
+// system), so the markup asks no media query for its colors: every color is worked out from
+// currentColor, which is the theme's text color, light or dark. It holds every detail tier laid
+// out in full, and a width media query, which inside the image reads the width the webview gives
+// it, shows the richest tier that fits on one line: bars and reset times, then bars, then short
+// bars, then the figures alone.
+
+export type EditorLook = 'A' | 'B' | 'C'
+export const EDITOR_LOOKS: readonly EditorLook[] = ['A', 'B', 'C']
+export const editorLookOf = (v: unknown): EditorLook => (EDITOR_LOOKS.includes(v as EditorLook) ? (v as EditorLook) : 'A')
+
+// The row's markup height and its ink: the cap band (the figures' cap and ascender height, which
+// the icons, bars and dots are sized to) runs EC.top to EC.top + EC.h, in the middle of the markup
+export const EH = 13
+const EC = { top: 1.5, h: 10 }
+const EBASE = EC.top + 9.75
+const EBAR = { h: 6, y: EC.top + EC.h / 2 - 3 }
+const EDOT = { cols: 10, pitch: 5, r: 1.6, rows: [EC.top + 1.6, EC.top + EC.h - 1.6] }
+const EICON = 10
+
+// One tier per detail level, richest first: bar length (0 for none), the context's dot matrix,
+// reset times, the context's icon (`176K/1M` reads as the context without it), the space between
+// groups (a hairline in its middle) and inside them. The last fits the four groups in a 280px panel.
+type Tier = { bar: number; dots: boolean; resets: boolean; ctxIcon: boolean; gap: number; inner: number }
+export const TIERS: readonly Tier[] = [
+  { bar: 60, dots: true, resets: true, ctxIcon: true, gap: 22, inner: 6 },
+  { bar: 60, dots: true, resets: false, ctxIcon: true, gap: 22, inner: 6 },
+  { bar: 32, dots: false, resets: false, ctxIcon: true, gap: 18, inner: 6 },
+  { bar: 0, dots: false, resets: false, ctxIcon: true, gap: 12, inner: 5 },
+  { bar: 0, dots: false, resets: false, ctxIcon: false, gap: 10, inner: 4 },
+]
+
+// Advance widths in em of the system font at 13px, weight 500, tabular figures (SF Pro, measured);
+// each text also sets textLength to this width, so another font changes letter spacing only
+const EADV: Record<string, number> = {
+  h: 0.6, d: 0.62, m: 0.89, K: 0.67, M: 0.88, '%': 0.96, '/': 0.31, '.': 0.31, ' ': 0.27,
+  F: 0.58, a: 0.56, b: 0.62, l: 0.26, e: 0.58, s: 0.53, O: 0.77, p: 0.62, u: 0.59, S: 0.64, n: 0.59, t: 0.37, o: 0.6, r: 0.4, i: 0.26, H: 0.72, k: 0.55, c: 0.55,
+}
+const eTextW = (v: string, size = 13) =>
+  [...v].reduce((w, c) => w + (c >= '0' && c <= '9' ? 0.64 : (EADV[c] ?? 0.62)), 0) * size + 0.2 * Math.max(0, [...v].length - 1)
+
+// sRGB hex to OKLCH lightness, chroma and hue (Björn Ottosson's OKLab)
+export const oklch = (hex: string): [number, number, number] => {
+  const n = parseInt(hex.slice(1), 16)
+  const lin = (v: number) => ((v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4)
+  const [r, g, b] = [lin((n >> 16) & 255), lin((n >> 8) & 255), lin(n & 255)]
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+  const L = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s
+  const A = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s
+  const B = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s
+  return [L, Math.hypot(A, B), ((Math.atan2(B, A) * 180) / Math.PI + 360) % 360]
+}
+
+// The colors, each worked out from currentColor (the theme's text) in CSS, so one markup reads in
+// either theme; each carries a plain fallback for a renderer without relative colors.
+// - A figure tinted toward a hue keeps the text's own OKLCH lightness and takes the hue at a
+//   chroma of FIGURE_C, so it keeps about the text's contrast: 9.8:1 and up on the preview's
+//   themes, 5.3:1 and up on VS Code's Light (Visual Studio), whose text is 5.6:1.
+// - A bar or a lit dot is the hue at a lightness that follows the text's: 0.3 + 0.5 × its
+//   lightness. That is 4.2:1 and up against the background in those three themes, 3.2:1 and up
+//   against its track (WCAG 1.4.11), and close to the hue itself in a dark theme.
+// - The track is the bar's color at 22% (upstream's); the hairlines are currentColor at upstream's
+//   opacities; muted text is currentColor mixed a quarter toward grey (4.8:1 and up).
+const FIGURE_C = 0.09
+const BAR = { l0: 0.3, k: 0.5, cMax: 0.14 }
+const r3 = (v: number) => +v.toFixed(3)
+const figureFill = (hue: string) => `fill:oklch(from currentColor l ${FIGURE_C} ${r3(oklch(hue)[2])})`
+const barColor = (hue: string) => {
+  const [, c, h] = oklch(hue)
+  return `oklch(from currentColor calc(${BAR.l0} + ${BAR.k} * l) ${r3(Math.min(c, BAR.cMax))} ${r3(h)})`
+}
+
+// The box's one accent (savvy-progress's band) for look C
+const ACCENT = '#8f8cf4'
+
+type EMetric =
+  | { kind: 'limit'; id: string; label: string; pct: number; left: string; hue: string; alt: string }
+  | { kind: 'ctx'; tokens: string; window: string; pct: number; hue: string; alt: string }
+  | { kind: 'cache'; pct: number; hue: string; alt: string }
+
+export const editorMetrics = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[] = []): EMetric[] => {
+  const out: EMetric[] = []
+  const limit = (id: string, label: string, l: Window | undefined, hue: string, alt: string) => {
+    if (!l) return
+    const pct = Math.round(l.percentUsed)
+    out.push({ kind: 'limit', id, label, pct, left: l.resetsAt ? fmtLeft(Date.parse(l.resetsAt) - at) : '', hue: pct >= 80 ? RED : hue, alt })
+  }
+  const five = m?.rateLimits.find(l => l.kind === 'five_hour')
+  const seven = m?.rateLimits.find(l => l.kind === 'seven_day')
+  limit('5h', '5h', five, HUE.five, `5-hour limit ${Math.round(five?.percentUsed ?? 0)}% used`)
+  limit('7d', '7d', seven, HUE.seven, `7-day limit ${Math.round(seven?.percentUsed ?? 0)}% used`)
+  models.forEach((s, i) => limit(`m${i}`, s.label, s, HUE.model, `${s.label} 7-day limit ${Math.round(s.percentUsed)}% used`))
+  if (m) {
+    const pct = m.context.percent ?? 0
+    out.push({ kind: 'ctx', tokens: fmtTokens(m.context.tokens ?? 0), window: `/${fmtTokens(m.context.window)}`, pct, hue: pct >= 80 ? RED : HUE.ctx, alt: '' })
+  }
+  const hit = t ? hitRate(t) : null
+  if (hit !== null) out.push({ kind: 'cache', pct: hit, hue: hit < 50 ? RED : HUE.cache, alt: '' })
+  return out
+}
+
+type Shine = 'always' | 'once' | 'none'
+type Paint = { figure: (hue: string) => string; label: (hue: string) => string; bar: (hue: string) => string; icon: (hue: string) => string }
+
+// A: upstream's look, every figure and label tinted with its metric's hue, bars and icons in it
+// B: the hues on the bars, dots and icons only; figures in the text color, labels muted
+// C: one accent: bars and dots in the box's accent, icons muted, figures in the text color.
+// In every look a metric in trouble (a limit or the context past 80%, a hit rate under 50%) turns
+// its figure and its bar red.
+const PAINT: Record<EditorLook, Paint> = {
+  A: { figure: figureFill, label: figureFill, bar: barColor, icon: barColor },
+  B: { figure: h => (h === RED ? figureFill(h) : ''), label: () => '', bar: barColor, icon: barColor },
+  C: { figure: h => (h === RED ? figureFill(h) : ''), label: () => '', bar: h => barColor(h === RED ? RED : ACCENT), icon: () => '' },
+}
+export const SHINE: Record<EditorLook, Shine> = { A: 'always', B: 'once', C: 'none' }
+
+const SHINE_W = 18
+const MUTE = 'color-mix(in srgb,currentColor 75%,#888)'
+
+// One tier's groups, laid out from x = 1; its width, and its markup in two layers (type, and the
+// bars and dots with their shine)
+const editorTier = (ms: EMetric[], tier: Tier, ti: number, look: EditorLook, shine: Shine) => {
+  const p = PAINT[look]
+  const fig = (hue: string, x: number, v: string, cls = 'n') =>
+    `<text x="${r3(x)}" y="${EBASE}" textLength="${r3(eTextW(v))}" lengthAdjust="spacing" class="${cls}"${p.figure(hue) ? ` style="${p.figure(hue)}"` : ''}>${esc(v)}</text>`
+  const lab = (hue: string, x: number, v: string) =>
+    `<text x="${r3(x)}" y="${EBASE}" textLength="${r3(eTextW(v))}" lengthAdjust="spacing" class="${p.label(hue) ? 'n' : 'm'}"${p.label(hue) ? ` style="${p.label(hue)}"` : ''}>${esc(v)}</text>`
+  const mute = (x: number, v: string) =>
+    `<text x="${r3(x)}" y="${EBASE}" textLength="${r3(eTextW(v))}" lengthAdjust="spacing" class="m">${esc(v)}</text>`
+  const paintBar = (hue: string) => `fill:${p.bar(hue)}`
+  const iconAt = (x: number, hue: string, body: string) =>
+    `<g class="ic" transform="translate(${r3(x)} ${EC.top})"${p.icon(hue) ? ` style="color:${p.icon(hue)}"` : ''}>${body}</g>`
+  const anim = (dist: number) => (shine === 'none' ? '' : ` style="animation:s${dist} 2.6s linear ${shine === 'always' ? 'infinite' : '1'}"`)
+  const used = new Set<number>()
+  let x = 1
+  const parts: string[] = []
+  ms.forEach((mt, gi) => {
+    if (gi > 0) {
+      parts.push(`<rect x="${r3(Math.round(x + tier.gap / 2) - 0.5)}" y="${EC.top}" width="1" height="${EC.h}" class="sep"/>`)
+      x += tier.gap
+    }
+    const id = `t${ti}g${gi}`
+    if (mt.kind === 'limit') {
+      parts.push(lab(mt.hue, x, mt.label))
+      x += eTextW(mt.label) + tier.inner
+      if (tier.bar > 0) {
+        const fw = Math.max(mt.pct > 0 ? EBAR.h : 0, Math.min(tier.bar, (tier.bar * mt.pct) / 100))
+        const bar = `x="${r3(x)}" y="${EBAR.y}" height="${EBAR.h}" rx="${EBAR.h / 2}"`
+        parts.push(
+          `<rect ${bar} width="${tier.bar}" class="trk" style="${paintBar(mt.hue)}"/>`,
+          `<rect ${bar} width="${r3(fw)}" class="bar" style="${paintBar(mt.hue)}"/>`,
+        )
+        if (shine !== 'none' && fw > 0) {
+          used.add(tier.bar + SHINE_W)
+          parts.push(
+            `<clipPath id="c${id}"><rect ${bar} width="${r3(fw)}"/></clipPath>`,
+            `<g clip-path="url(#c${id})"><rect class="sh" x="${r3(x - SHINE_W)}" y="${EBAR.y}" width="${SHINE_W}" height="${EBAR.h}" fill="url(#shine)"${anim(tier.bar + SHINE_W)}/></g>`,
+          )
+        }
+        x += tier.bar + tier.inner
+      }
+      const pct = `${mt.pct}%`
+      parts.push(fig(mt.hue, x, pct))
+      x += eTextW(pct)
+      if (tier.resets && mt.left) {
+        x += tier.inner
+        parts.push(`<rect x="${r3(x)}" y="${EC.top}" width="1" height="${EC.h}" class="rule"/>`)
+        x += 1 + tier.inner
+        parts.push(mute(x, mt.left))
+        x += eTextW(mt.left)
+      }
+    } else if (mt.kind === 'ctx') {
+      if (tier.ctxIcon) {
+        parts.push(iconAt(x, mt.hue, LAYERS_ICON))
+        x += EICON + 4
+      }
+      if (tier.dots) {
+        const lit = Math.min(EDOT.cols * 2, Math.round((mt.pct / 100) * EDOT.cols * 2))
+        const dot = (i: number) => `<circle cx="${r3(x + EDOT.pitch / 2 + (i % EDOT.cols) * EDOT.pitch)}" cy="${r3(EDOT.rows[Math.floor(i / EDOT.cols)]!)}" r="${EDOT.r}"/>`
+        const on = Array.from({ length: lit }, (_, i) => dot(i)).join('')
+        const off = Array.from({ length: EDOT.cols * 2 - lit }, (_, i) => dot(lit + i)).join('')
+        const mw = EDOT.cols * EDOT.pitch
+        parts.push(`<g class="trk" style="${paintBar(mt.hue)}">${off}</g>`, `<g class="bar" style="${paintBar(mt.hue)}">${on}</g>`)
+        if (shine !== 'none' && lit > 0) {
+          used.add(mw + SHINE_W)
+          parts.push(
+            `<clipPath id="c${id}">${on}</clipPath>`,
+            `<g clip-path="url(#c${id})"><rect class="sh" x="${r3(x - SHINE_W)}" y="${EC.top}" width="${SHINE_W}" height="${EC.h}" fill="url(#shine)"${anim(mw + SHINE_W)}/></g>`,
+          )
+        }
+        x += mw + tier.inner
+      }
+      parts.push(fig(mt.hue, x, mt.tokens))
+      x += eTextW(mt.tokens) + 1
+      parts.push(mute(x, mt.window))
+      x += eTextW(mt.window)
+    } else {
+      parts.push(iconAt(x, mt.hue, TARGET_ICON))
+      x += EICON + 4
+      const pct = `${mt.pct}%`
+      parts.push(fig(mt.hue, x, pct))
+      x += eTextW(pct)
+    }
+  })
+  return { width: Math.ceil(x + 1), body: parts.join(''), used }
+}
+
+// The icons in currentColor, which each icon's group sets to its hue (or leaves the muted text's)
+const LAYERS_ICON =
+  `<g fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round">` +
+  `<path d="M5 0.6 L9.4 2.8 L5 5 L0.6 2.8 Z" fill="currentColor" fill-opacity="0.25"/>` +
+  `<path d="M0.6 5.2 L5 7.4 L9.4 5.2"/><path d="M0.6 7.2 L5 9.4 L9.4 7.2"/></g>`
+const TARGET_ICON =
+  `<g fill="none" stroke="currentColor" stroke-width="1.2">` +
+  `<circle cx="5" cy="5" r="4.4"/><circle cx="5" cy="5" r="2.1"/><circle cx="5" cy="5" r="0.7" fill="currentColor"/></g>`
+
+// The markup: width 100% and no viewBox, so the webview draws it at the row's width and nothing
+// in it scales (CHECKLIST #3). `fresh` is whether look B's single shine is still due.
+export const editorSvg = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[], look: EditorLook, fresh = true) => {
+  const ms = editorMetrics(m, t, at, models)
+  const shine: Shine = SHINE[look] === 'once' && !fresh ? 'none' : SHINE[look]
+  const tiers = TIERS.map((tier, i) => editorTier(ms, tier, i, look, shine))
+  // Tier i shows from its own width up to the next richer tier's; the last shows below that too
+  const show = tiers
+    .map((tr, i) => (i === 0 ? '' : `@media (max-width:${tiers[i - 1]!.width - 0.02}px){.v${i - 1}{display:none}.v${i}{display:inline}}`))
+    .join('')
+  const used = new Set(tiers.flatMap(tr => [...tr.used]))
+  const keys = [...used].map(d => `@keyframes s${d}{0%{transform:translateX(0)}62%,100%{transform:translateX(${d}px)}}`).join('')
+  const css =
+    `text{font-family:Inter,"SF Pro Text",system-ui,-apple-system,"Segoe UI",sans-serif;font-size:13px;font-weight:500;font-feature-settings:"tnum","cv05"}` +
+    `.n{fill:currentColor}.m{fill:currentColor;fill:${MUTE};font-weight:400}` +
+    `.ic{color:${MUTE}}` +
+    `.bar{fill:currentColor}.trk{fill:currentColor;fill-opacity:.22}` +
+    `.sep{fill:currentColor;fill-opacity:.2}.rule{fill:currentColor;fill-opacity:.12}` +
+    tiers.map((_, i) => (i === 0 ? '' : `.v${i}`)).filter(Boolean).join(',') + `{display:none}` +
+    show +
+    keys +
+    (shine === 'none' ? '' : `@media (prefers-reduced-motion:reduce){.sh{animation:none!important}}`)
+  const defs =
+    shine === 'none'
+      ? ''
+      : `<defs><linearGradient id="shine" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/>` +
+        `<stop offset=".5" stop-color="#fff" stop-opacity=".8"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>`
+  const body = tiers.map((tr, i) => `<g class="v${i}">${tr.body}</g>`).join('')
+  return {
+    svg: `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${EH}"><style>${css}</style>${defs}${body}</svg>`,
+    widths: tiers.map(tr => tr.width),
+  }
+}
+
+// ---- Stacking in the box above the prompt (layout/ABOVE-PROMPT.md, C1 and C2)
+
+// VS Code's space around the row, in the box's lines (1.4 × 13px), measured by ink in the
+// layout preview (the host gives 1px under its title and 4px at the bottom):
+// - above: the row's first ink 7px under the host's title, which leaves it 3px under the divider
+//   of a block above;
+// - between: from the row's last ink to the divider's join, so the line hangs 3px under it;
+//   The row's last ink is the foot of the context's `/`, 1px under the figures' baseline.
+// - unspaced: under the divider, before a block beneath that brings no space of its own;
+// - end: with nothing beneath, the row owns the box's bottom edge: 5px under its last ink.
+export const SPACE = { above: 0.173, between: 0.122, unspaced: 0.06, end: 0.03 } as const
+// The divider between two mods' blocks: 1px of the theme's prompt border color, its Box of no
+// height, the line hanging DIVIDER.hang under the join
+export const DIVIDER = { line: 0.055, hang: 0.044 } as const
+
+// Whether a tree is Claude Code's own drawing, `{ type: 'engine' }`, which stands only at the root
+export const isEngine = (node: unknown): boolean =>
+  typeof node === 'object' && node !== null && (node as { type?: unknown }).type === 'engine'
+
+// Whether a tree shows anything: a Box that holds nothing but empty Boxes and blank strings shows
+// nothing. A drawn element keeps its children beside its props, not in them.
+export const draws = (node: unknown): boolean => {
+  if (node == null || typeof node === 'boolean') return false
+  if (typeof node === 'string') return node.trim() !== ''
+  if (Array.isArray(node)) return node.some(draws)
+  if (typeof node !== 'object') return true
+  const { type, children, props } = node as { type?: string; children?: unknown; props?: { children?: unknown } }
+  if (type !== 'Box') return true
+  return draws(children) || draws(props?.children)
+}
+
+const SIDES = {
+  top: ['paddingTop', 'paddingY', 'padding', 'marginTop', 'marginY', 'margin'],
+  bottom: ['paddingBottom', 'paddingY', 'padding', 'marginBottom', 'marginY', 'margin'],
+} as const
+
+// Whether a tree starts (or ends) with space of its own: a padding or margin on that side of its
+// root, or of the first (last) of a column's children, as far down as the first (last) row goes
+const spaced = (node: unknown, side: keyof typeof SIDES): boolean => {
+  if (typeof node !== 'object' || node === null || (node as { type?: unknown }).type !== 'Box') return false
+  const { props = {}, children = [] } = node as { props?: Record<string, unknown>; children?: unknown[] }
+  const has = SIDES[side].some(k => {
+    const v = props[k]
+    return (typeof v === 'number' && v > 0) || (typeof v === 'string' && v !== '' && v !== '0')
+  })
+  if (has) return true
+  const rows = (Array.isArray(children) ? children : [children]).filter(c => c != null && c !== false && c !== '')
+  return props.flexDirection === 'column' && spaced(side === 'top' ? rows[0] : rows[rows.length - 1], side)
+}
+export const startsSpaced = (node: unknown) => spaced(node, 'top')
+export const endsSpaced = (node: unknown) => spaced(node, 'bottom')
+
 // The desktop app redraws the band, and its frame blinks, on every write a drawing reads. So a
 // reading is only written when it changes what the band shows: a new token count that rounds to
 // the same figure, or a clock tick that leaves every countdown as it was, writes nothing.
-const shown = (m: Measure | null, t: TurnTokens | null, at: number) => desktopSvg(m, t, at).svg
+const shown = (m: Measure | null, t: TurnTokens | null, at: number, s: ScopedReading | null) =>
+  desktopSvg(m, t, at, modelsAt(s, at)).svg
+
+// Look B's shine crosses once after what the row shows changes, then the markup carries no
+// animation, so the webview stops drawing it frame by frame
+const SWEEP_MS = 3_000
+let sweepLook: EditorLook | null = null
+const swept = async ($: EngineInterface) => {
+  if (sweepLook !== 'B') return
+  await update($, sweep, () => true)
+  $.clock.after(SWEEP_MS, () => {
+    void update($, sweep, () => false)
+  })
+}
+
+const readAll = async ($: EngineInterface) =>
+  [await read($, measure), await read($, turn), await read($, now), await read($, scoped)] as const
 
 const tick = async ($: EngineInterface) => {
   const at = await $.clock.now()
-  const [m, t, was] = [await read($, measure), await read($, turn), await read($, now)]
-  if (was && shown(m, t, was) === shown(m, t, at)) return
+  const [m, t, was, s] = await readAll($)
+  if (was && shown(m, t, was, s) === shown(m, t, at, s)) return
   await update($, now, () => at)
 }
 
 const setMeasure = async ($: EngineInterface, next: Measure) => {
-  const [m, t, at] = [await read($, measure), await read($, turn), await read($, now)]
-  if (m && shown(m, t, at) === shown(next, t, at)) return
+  const [m, t, at, s] = await readAll($)
+  if (m && shown(m, t, at, s) === shown(next, t, at, s)) return
   await update($, measure, () => next)
+  await swept($)
 }
 
 const setTurn = async ($: EngineInterface, next: TurnTokens) => {
-  const [m, t, at] = [await read($, measure), await read($, turn), await read($, now)]
-  if (t && shown(m, t, at) === shown(m, next, at)) return
+  const [m, t, at, s] = await readAll($)
+  if (t && shown(m, t, at, s) === shown(m, next, at, s)) return
   await update($, turn, () => next)
+  await swept($)
+}
+
+const setScoped = async ($: EngineInterface, next: ScopedReading) => {
+  const [m, t, at, s] = await readAll($)
+  const when = at || (await $.clock.now())
+  if (s && s.at >= next.at) return
+  const visible = shown(m, t, when, s) !== shown(m, t, when, next)
+  await update($, scoped, () => next)
+  if (visible) await swept($)
 }
 
 // Shown by the preview when the session has no reading yet
@@ -402,9 +835,13 @@ export const WELCOME =
   'usage-band is on: your 5h and 7d limits, context window and cache hit rate now show above the prompt. ' +
   'The limits fill in after Claude’s first reply.'
 
-export const register: Register = on => {
+// `options.look` picks the VS Code look (A, B or C) for the layout preview, which passes it; the
+// plugin declares no such option, so a session gets the default.
+export const register: Register = (on, options) => {
   let setting = 'auto'
-  // The terminal animates by redrawing; started by its first draw, so a desktop-only session
+  const look = editorLookOf((options as Record<string, unknown> | undefined)?.look)
+  sweepLook = look
+  // The terminal animates by redrawing; started by its first draw, so a session without a terminal
   // never runs it. A reload drops the timer and this flag together.
   let isAnimating = false
 
@@ -424,9 +861,11 @@ export const register: Register = on => {
     }
     const usage = await $.session.usage()
     await setMeasure($, { context: usage.context, rateLimits: usage.rateLimits })
+    // The session starts without waiting on the endpoint
+    void pollScoped($)
     await tick($)
     $.clock.every(60_000, () => {
-      void tick($)
+      void pollScoped($).then(() => tick($))
     })
     return result
   })
@@ -486,41 +925,91 @@ export const register: Register = on => {
     )
   })
 
+  // The box above the prompt is one slot that several mods share: this row goes on top, and what
+  // the hooks beneath drew stays under it (C1), in VS Code past a divider line (C2). A survey keeps
+  // the slot to the hooks beneath.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const theirs = await next(e)
+    if (e.props.hasSurvey) return theirs
     const m = await read($, measure)
     const t = await read($, turn)
     const at = await read($, now)
-    if (e.props.hasSurvey || (m === null && t === null)) return next(e)
-
-    // Desktop and mobile animate inside the SVG, so they never read the frame counter
-    if (e.surface === 'desktop' || e.surface === 'mobile') {
-      const { Box, Svg } = $.ui.resolve(e)
-      const { svg, width, height } = desktopSvg(m, t, at)
-      return (
+    const models = modelsAt(await read($, scoped), at)
+    if (m === null && t === null && models.length === 0) return theirs
+    // Claude Code's own placeholder is never nested: the desktop drops a band that nests it
+    const below = isEngine(theirs) || !draws(theirs) ? null : theirs
+    const { Box } = $.ui.resolve(e)
+    let row
+    if (e.surface === 'vscode') {
+      const { Svg } = $.ui.resolve(e)
+      const fresh = await read($, sweep)
+      const { svg } = editorSvg(m, t, at, models, look, fresh)
+      row = (
+        <Box flexDirection="row" flexWrap="nowrap">
+          <Box flexDirection="column" width={0} flexGrow={1} minWidth={0}>
+            <Svg source={svg} alt={describe(m, t, models)} />
+          </Box>
+        </Box>
+      )
+    } else if (e.surface === 'desktop' || e.surface === 'mobile') {
+      // Desktop and mobile animate inside the SVG, so they never read the frame counter
+      const { Svg } = $.ui.resolve(e)
+      const { svg, width, height } = desktopSvg(m, t, at, models)
+      row = (
         <Box flexDirection="row" justifyContent="center" flexGrow={1} paddingX={1}>
-          <Svg source={svg} alt={describe(m, t)} width={width} height={height} />
+          <Svg source={svg} alt={describe(m, t, models)} width={width} height={height} />
+        </Box>
+      )
+    } else {
+      if (!isAnimating) {
+        isAnimating = true
+        $.clock.every(FRAME_MS, () => {
+          void update($, phase, f => (f ?? 0) + 1)
+        })
+      }
+      const frame = await read($, phase)
+      // The terminal font decides icons
+      const s = await read($, style)
+      const spans = fit(m, t, at, e.props.bodyColumns - 2, frame, { style: s, colors: 'true' }, models)
+      const { Text } = $.ui.resolve(e)
+      row = (
+        <Box flexDirection="row" flexWrap="wrap" paddingX={1}>
+          {spans.map((sp, i) => (
+            <Text key={`s${i}`} color={sp.color} dimColor={sp.dim}>
+              {sp.text}
+            </Text>
+          ))}
         </Box>
       )
     }
-
-    if (!isAnimating) {
-      isAnimating = true
-      $.clock.every(FRAME_MS, () => {
-        void update($, phase, f => (f ?? 0) + 1)
-      })
+    if (e.surface !== 'vscode') {
+      // The terminal, the desktop and mobile stack the rows with no gap: the terminal has no half rows
+      return below ? (
+        <Box flexDirection="column">
+          {row}
+          {below}
+        </Box>
+      ) : (
+        row
+      )
     }
-    const frame = await read($, phase)
-    // The terminal font decides icons; other surfaces (vscode) get the plain set
-    const s = e.surface === 'terminal' ? await read($, style) : 'unicode'
-    const spans = fit(m, t, at, e.props.bodyColumns - 2, frame, { style: s, colors: 'true' })
-    const { Box, Text } = $.ui.resolve(e)
+    // VS Code's box (C2): the row brings its own space above it. A block beneath is joined to it by
+    // a divider in the middle of the 7px between them; the block beneath brings its own space under
+    // the divider, or gets this root's when it brings none.
     return (
-      <Box flexDirection="row" flexWrap="wrap" paddingX={1}>
-        {spans.map((sp, i) => (
-          <Text key={`s${i}`} color={sp.color} dimColor={sp.dim}>
-            {sp.text}
-          </Text>
-        ))}
+      <Box flexDirection="column" paddingTop={SPACE.above} {...(below ? {} : { paddingBottom: SPACE.end })}>
+        {row}
+        {below && (
+          <Box
+            flexDirection="column"
+            height={0}
+            marginTop={SPACE.between}
+            {...(startsSpaced(below) ? {} : { marginBottom: SPACE.unspaced })}
+          >
+            <Box height={DIVIDER.line} marginTop={DIVIDER.hang} flexShrink={0} backgroundColor="promptBorder" />
+          </Box>
+        )}
+        {below}
       </Box>
     )
   })

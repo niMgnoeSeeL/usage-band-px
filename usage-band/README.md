@@ -1,3 +1,5 @@
+> This is the `usage-band-px` fork (1.0.6-px.1). Its changes are listed under "Local fork changes" in the repo's top `README.md`.
+
 # usage-band
 
 A Claude Code mod that puts a one-line band above the prompt with what you need to keep an eye on while you work:
@@ -51,7 +53,7 @@ Mods run with the same access as Claude Code itself; they are not sandboxed. Thi
 - reads the `TERM_PROGRAM` and `USAGE_BAND_ICONS` environment variables to pick terminal icons
 - registers the `/usage-band-preview` command and draws the band
 
-It reads no files, runs no processes and makes no network requests.
+It reads no files and runs no processes. In this fork it also asks `https://api.anthropic.com/api/oauth/usage` for the per-model weekly windows, at most once per 5 minutes across sessions, with the session's own credential (`$.session.authorize`), and keeps the reading and the time of the last attempt in its own store.
 
 ## Development
 

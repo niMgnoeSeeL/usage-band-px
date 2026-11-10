@@ -1,3 +1,27 @@
+## Local fork changes (1.0.6-px.1)
+
+This is `usage-band-px`, a local fork of usage-band 1.0.6. It draws the band in VS Code's box above the prompt, to the shared box's contract in `claude-mod/layout/ABOVE-PROMPT.md` (C1 and C2), and adds each per-model weekly window (Fable's) beside the 7-day one. The terminal and the desktop keep upstream's look, apart from the stacking and the per-model window.
+
+- **VS Code draws the desktop's look**, not the terminal's text: one Svg that fills the row (`width="100%"`, no viewBox, 13px high), in a column Box inside a nowrap row.
+  - It holds five detail tiers, each laid out in full, and a width media query shows the richest that fits on one line: bars with reset times, bars, short bars, figures alone, and figures without the context icon (fits a 280px panel).
+  - Every color is worked out from `currentColor`, which the webview sets to the theme's text color. The markup asks no `prefers-color-scheme`: inside the webview's sandboxed frame that query follows the operating system, not the editor's theme (VS Code's `window.systemColorTheme` defaults to the system).
+  - A tinted figure keeps the text's OKLCH lightness and takes its metric's hue at chroma 0.09: 9.8:1 and up on the preview's themes, 5.3:1 and up on Light (Visual Studio). A bar or lit dot is its hue at lightness `0.3 + 0.5 × the text's`: 4.2:1 and up against the background and 3.2:1 and up against its 22% track. Muted text is `currentColor` mixed a quarter toward grey (4.8:1 and up).
+  - The shine is a CSS animation, which stops under `prefers-reduced-motion`.
+  - The terminal's 200ms redraw timer no longer runs in VS Code.
+- **The look in VS Code** is chosen by `options.look`, which only `claude-mod/layout/preview` passes (`USAGEBAND_LOOK`); the plugin declares no such option. The default is `A` until one is picked.
+  - `A`: upstream's hues on figures, labels, bars and icons; the shine runs always.
+  - `B`: the hues on bars, dots and icons only; figures in the text color, labels muted; the shine crosses once after what the row shows changes, then the markup carries no animation.
+  - `C`: bars and dots in the box's one accent (savvy-progress's `#8f8cf4`), icons muted, figures in the text color; no motion.
+  - In every look a metric in trouble (a limit or the context past 80%, a hit rate under 50%) turns its figure and bar red.
+- **Per-model weekly windows** come from `https://api.anthropic.com/api/oauth/usage`, the endpoint Claude Code's `/usage` reads, through `$.session.authorize()` and `$.http.fetch(url, { auth })`. Neither `$.session.usage()` nor `session.measure` carries them.
+  - The answer's `limits` rows of kind `weekly_scoped` give the label (`scope.model.display_name`), `percent` and `resets_at`. The `model_scoped` shape that Claude Code's SDK projects them to is read too.
+  - It asks at most once per 5 minutes across all open sessions: the time of the last attempt (`scoped-tried`) and the reading (`scoped`) are shared through `$.store`. The attempt's time is written before the request; a refused request waits out the same 5 minutes. A session with no first-party login asks nothing. Session start does not wait on it.
+  - A reading older than 30 minutes, or a window that has reset since it was read, is not drawn.
+- **Stacking, on every surface:** the row goes on top, and what the hooks beneath drew stays under it (C1). Claude Code's own placeholder (`{ type: 'engine' }`) is never nested, and a survey keeps the slot to the hooks beneath.
+- **Space in VS Code's box** (C2), in lines of 1.4 × 13px: `paddingTop 0.173` puts the row's first ink 7px under the host's title, 3px under a divider above it, and 5.5–6px under the frame's top edge without the title. A block beneath is joined by the divider (`marginTop 0.122` from the foot of the context's `/`, the row's last ink, to the join; the line hangs `0.044`), and a block with no top space of its own gets `marginBottom 0.06` under it. With nothing beneath, `paddingBottom 0.03` puts the box's bottom edge 5px under the row.
+  - Measured in the composite preview (`layout/preview`, every case, 280, 420 and 640px, light and dark): title → row 7.0, top edge → row 5.5–6.0, divider → row 2.5–3.0, row → divider 3.0–3.5, row → bottom edge 4.5–5.0.
+- **What it can reach** grows by the one request above and two keys in its own store. It still reads no files and runs no processes.
+
 <div align="center">
 
 # CC-Usage-Band
@@ -48,7 +72,7 @@ English · [简体中文](./README.zh-CN.md)
 - **Glanceable.** Each metric has its own color. It turns red only when it needs you: a limit or the context past 80%, or a cache hit rate under 50%.
 - **Alive, not noisy.** A slow shine sweeps across the limit bars, every bar in step.
 - **Native on both surfaces.** Terminal: a character line with Nerd Font or Unicode icons that fits itself to the window width. Desktop app: a centered SVG row with bars, a 2×10 dot matrix for the context window, and light and dark mode.
-- **Light.** No files read, no processes, no network. It only listens to the usage figures Claude Code already has.
+- **Light.** No files read, no processes. It listens to the usage figures Claude Code already has; this fork adds one request for the per-model weekly windows, at most every 5 minutes.
 
 ## Requirements
 
@@ -126,7 +150,7 @@ Mods run with the same access as Claude Code itself and are not sandboxed, so he
 - **Registers** one command, `/usage-band-preview`
 - **Draws** the band above the prompt
 
-It does not read or write files, run processes, call the network or send any data anywhere. The whole mod is one file: [`usage-band/hooks/register.tsx`](./usage-band/hooks/register.tsx).
+It does not read or write files or run processes. This fork asks the usage endpoint for the per-model weekly windows, at most once per 5 minutes across sessions, and sends nothing else anywhere. The whole mod is one file: [`usage-band/hooks/register.tsx`](./usage-band/hooks/register.tsx).
 
 ## Development
 
