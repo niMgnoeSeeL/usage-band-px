@@ -9,6 +9,7 @@ import {
   SCOPED_EVERY_MS,
   SCOPED_URL,
   STALE_OPACITY,
+  shortAlt,
   desktopSvg,
   fit,
   LEFT_X,
@@ -108,7 +109,7 @@ test('asks the endpoint at most once per five minutes across sessions, and share
   expect(store.get('scoped')).toEqual({ at: NOW, limits: [{ label: 'Fable', percentUsed: 20, resetsAt: RESET }] })
   const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'vscode', ...BAND })
   expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe(
-    '7-day limit 43% used, Fable 7-day limit 20% used, context 176K of 1M',
+    '7d 43% · Fable 20% · ctx 176K/1M',
   )
 
   // The minute ticks inside the five minutes ask nothing
@@ -122,7 +123,7 @@ test('asks the endpoint at most once per five minutes across sessions, and share
   await clock.advance(2 * MIN)
   await clock.settle()
   expect(asked.length).toBe(1)
-  expect(String((await ui.find({ type: 'Svg' }))?.props.alt)).toContain('Fable 7-day limit 24% used')
+  expect(String((await ui.find({ type: 'Svg' }))?.props.alt)).toContain('Fable 24%')
 
   // Five minutes after that session's attempt, this one asks
   await clock.advance(SCOPED_EVERY_MS)
@@ -179,6 +180,8 @@ test('a stale window is drawn faded and still on every surface, and says so to a
   const at = term.findIndex(sp => sp.text.startsWith('Fable'))
   const sep = term.findIndex((sp, i) => i > at && sp.text.trim() === '' && sp.text.length >= 2)
   expect(term.slice(at, sep).every(sp => sp.dim)).toBe(true)
+  // VS Code's one-line alt, shown in place of a picture the webview does not draw
+  expect(shortAlt(MEASURE, TURN, stale)).toBe('7d 43% · Fable 20% (old) · ctx 176K/1M · cache 97%')
 })
 
 test('a failed attempt is recorded with its reason, and cleared by the next reading', async ($, on) => {

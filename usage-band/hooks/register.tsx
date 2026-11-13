@@ -379,6 +379,22 @@ export const desktopSvg = (m: Measure | null, t: TurnTokens | null, at: number, 
 export const STALE_OPACITY = 0.55
 const altOf = (s: Scoped) => `${s.label} 7-day limit ${Math.round(s.percentUsed)}% used${s.stale ? ', not updated for over 30 minutes' : ''}`
 
+// VS Code's alt text: the row's figures on one short line, as the row shows them. The webview
+// shows it in place of the picture whenever it does not draw one (it pauses drawing for a minute
+// when its drawing frame is slow to start), so it must read as the row does
+export const shortAlt = (m: Measure | null, t: TurnTokens | null, models: Scoped[] = []) => {
+  const parts: string[] = []
+  const five = m?.rateLimits.find(l => l.kind === 'five_hour')
+  const seven = m?.rateLimits.find(l => l.kind === 'seven_day')
+  if (five) parts.push(`5h ${Math.round(five.percentUsed)}%`)
+  if (seven) parts.push(`7d ${Math.round(seven.percentUsed)}%`)
+  for (const s of models) parts.push(`${s.label} ${Math.round(s.percentUsed)}%${s.stale ? ' (old)' : ''}`)
+  if (m) parts.push(`ctx ${fmtTokens(m.context.tokens ?? 0)}/${fmtTokens(m.context.window)}`)
+  const hit = t ? hitRate(t) : null
+  if (hit !== null) parts.push(`cache ${hit}%`)
+  return parts.join(' · ')
+}
+
 export const describe = (m: Measure | null, t: TurnTokens | null, models: Scoped[] = []) => {
   const parts: string[] = []
   for (const l of m?.rateLimits ?? []) {
@@ -1112,7 +1128,7 @@ export const register: Register = on => {
       row = (
         <Box flexDirection="row" flexWrap="nowrap">
           <Box flexDirection="column" width={0} flexGrow={1} minWidth={0}>
-            <Svg source={svg} alt={describe(m, t, models)} />
+            <Svg source={svg} alt={shortAlt(m, t, models)} />
           </Box>
         </Box>
       )

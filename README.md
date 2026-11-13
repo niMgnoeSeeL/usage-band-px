@@ -1,4 +1,4 @@
-## Local fork changes (1.0.6-px.3)
+## Local fork changes (1.0.6-px.4)
 
 This is `usage-band-px`, a local fork of usage-band 1.0.6. It draws the band in VS Code's box above the prompt, to the shared box's contract in `claude-mod/layout/ABOVE-PROMPT.md` (C1 and C2). It also adds each per-model weekly window (Fable's) beside the 7-day one. The desktop keeps upstream's look, apart from the stacking and the per-model window; the terminal keeps it too, with its line taking the slot's width.
 
