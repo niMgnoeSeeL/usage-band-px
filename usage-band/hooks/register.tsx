@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Limit, Measure, Scoped, ScopedReading, Style, TurnTokens } from '../types'
+import type { Limit, Measure, Scoped, ScopedError, ScopedReading, Style, TurnTokens } from '../types'
 
 const measure = atom({ plugin: 'usage-band', key: 'measure' } as const, null)
 const turn = atom({ plugin: 'usage-band', key: 'turn' } as const, null)
@@ -90,8 +90,8 @@ export const width = (spans: Span[]) => spans.reduce((n, s) => n + [...s.text].l
 export const bar = (pct: number, cells: number, color: string, frame: number, s: Style = 'unicode'): Span[] => {
   const g = GLYPHS[s]
   const filled = Math.max(pct > 0 ? 1 : 0, Math.min(cells, Math.round((pct / 100) * cells)))
-  // Same period for every bar, so all highlights travel in step
-  const pos = frame % (cells + 5)
+  // Same period for every bar, so all highlights travel in step; a negative frame draws none
+  const pos = frame < 0 ? -2 : frame % (cells + 5)
   const spans: Span[] = []
   for (let i = 0; i < filled; i++) {
     const shade = filled === 1 ? 0 : -0.15 + (0.35 * i) / (filled - 1)
@@ -116,19 +116,20 @@ export const layout = (
   const g = GLYPHS[look.style]
   const groups: Span[][] = []
 
-  const limit = (label: string, l: Window | undefined, hue: string) => {
+  const limit = (label: string, l: Window | undefined, hue: string, stale = false) => {
     if (!l) return
     const pct = Math.round(l.percentUsed)
     const color = pct >= 80 ? RED : hue
     const out: Span[] = [{ text: `${label} `, color }]
-    if (detail === 2) out.push(...bar(pct, cells, color, frame, look.style), { text: ' ' })
+    // A stale window's bar stands still: no highlight sweeps it
+    if (detail === 2) out.push(...bar(pct, cells, color, stale ? -1 : frame, look.style), { text: ' ' })
     out.push({ text: `${pct}%`, color })
     if (detail >= 1 && l.resetsAt) out.push({ text: ` · ${fmtLeft(Date.parse(l.resetsAt) - at)}`, dim: true })
-    groups.push(out)
+    groups.push(stale ? out.map(sp => ({ ...sp, dim: true })) : out)
   }
   limit('5h', m?.rateLimits.find(l => l.kind === 'five_hour'), HUE.five)
   limit('7d', m?.rateLimits.find(l => l.kind === 'seven_day'), HUE.seven)
-  for (const s of models) limit(s.label, s, HUE.model)
+  for (const s of models) limit(s.label, s, HUE.model, s.stale)
 
   if (m) {
     const pct = m.context.percent ?? 0
@@ -208,7 +209,7 @@ type Group = { width: number; draw: (x: number) => Layers }
 
 // 5h 60% ▬▬▬▬── 1h49m: the figure first, so the state reads before the bar
 // 5h ▬▬▬▬▬▬──── 69% │ 1h31m: label, bar, figure, then when it resets
-const limitGroup = (id: string, label: string, l: Window, hue: string, at: number): Group => {
+const limitGroup = (id: string, label: string, l: Window, hue: string, at: number, still = false): Group => {
   const pct = Math.round(l.percentUsed)
   const color = pct >= 80 ? RED : hue
   const pctText = `${pct}%`
@@ -230,7 +231,7 @@ const limitGroup = (id: string, label: string, l: Window, hue: string, at: numbe
         `<rect x="${bx}" y="${y}" width="${fillW}" height="${D.barH}" rx="${r}" fill="${lighten(color, -0.12)}"/>`,
         // The shine crosses the whole bar on one shared clock and shows only over the fill,
         // so both bars' shines sit at the same spot at every moment
-        `<g clip-path="url(#c-${id})"><rect y="${y}" width="18" height="${D.barH}" fill="url(#shine)">` +
+        still ? '' : `<g clip-path="url(#c-${id})"><rect y="${y}" width="18" height="${D.barH}" fill="url(#shine)">` +
           `<animate attributeName="x" values="${bx - 18};${bx + D.barW};${bx + D.barW}" keyTimes="0;0.62;1" dur="2.6s" repeatCount="indefinite"/></rect></g>`,
       ]
       const stat = [ink(color, x, 19.5, label, D.base), ink(color, px, 19.5, pctText, D.base)]
@@ -337,9 +338,14 @@ export const desktopParts = (m: Measure | null, t: TurnTokens | null, at: number
   const seven = m?.rateLimits.find(l => l.kind === 'seven_day')
   if (five) groups.push({ g: limitGroup('5h', '5h', five, HUE.five, at), alt: `5-hour limit ${Math.round(five.percentUsed)}% used` })
   if (seven) groups.push({ g: limitGroup('7d', '7d', seven, HUE.seven, at), alt: `7-day limit ${Math.round(seven.percentUsed)}% used` })
-  models.forEach((s, i) =>
-    groups.push({ g: limitGroup(`m${i}`, s.label, s, HUE.model, at), alt: `${s.label} 7-day limit ${Math.round(s.percentUsed)}% used` }),
-  )
+  models.forEach((s, i) => {
+    const g = limitGroup(`m${i}`, s.label, s, HUE.model, at, s.stale)
+    // A stale window is drawn faded, without its shine
+    const faded: Group = s.stale
+      ? { width: g.width, draw: x => { const d = g.draw(x); return { stat: `<g opacity="${STALE_OPACITY}">${d.stat}${d.motion}</g>`, motion: '' } } }
+      : g
+    groups.push({ g: faded, alt: altOf(s) })
+  })
   if (m) {
     const pct = m.context.percent ?? 0
     groups.push({
@@ -369,13 +375,17 @@ export const desktopSvg = (m: Measure | null, t: TurnTokens | null, at: number, 
   return { svg: wrap(width, body.join('')), width, height: D.h }
 }
 
+// How faded a stale window is drawn: its figures stay readable, a step under the live ones
+export const STALE_OPACITY = 0.55
+const altOf = (s: Scoped) => `${s.label} 7-day limit ${Math.round(s.percentUsed)}% used${s.stale ? ', not updated for over 30 minutes' : ''}`
+
 export const describe = (m: Measure | null, t: TurnTokens | null, models: Scoped[] = []) => {
   const parts: string[] = []
   for (const l of m?.rateLimits ?? []) {
     if (l.kind === 'five_hour') parts.push(`5-hour limit ${Math.round(l.percentUsed)}% used`)
     if (l.kind === 'seven_day') parts.push(`7-day limit ${Math.round(l.percentUsed)}% used`)
   }
-  for (const s of models) parts.push(`${s.label} 7-day limit ${Math.round(s.percentUsed)}% used`)
+  for (const s of models) parts.push(altOf(s))
   if (m) parts.push(`context ${fmtTokens(m.context.tokens ?? 0)} of ${fmtTokens(m.context.window)}`)
   const hit = t ? hitRate(t) : null
   if (hit !== null) parts.push(`cache hit ${hit}%`)
@@ -390,11 +400,13 @@ export const describe = (m: Measure | null, t: TurnTokens | null, models: Scoped
 
 export const SCOPED_URL = 'https://api.anthropic.com/api/oauth/usage'
 export const SCOPED_EVERY_MS = 5 * 60_000
-// A reading this old says nothing current (the endpoint has failed for half an hour), so it is
-// no longer drawn
+// A reading this old may no longer be current (nothing has been read for half an hour), so its
+// windows are drawn faded, and the API marks it stale
 export const SCOPED_STALE_MS = 30 * 60_000
 export const SCOPED_KEY = 'scoped'
 export const SCOPED_TRIED_KEY = 'scoped-tried'
+// Why the last attempt failed (ScopedError); null once an attempt succeeds
+export const SCOPED_ERROR_KEY = 'scoped-error'
 
 const isoOf = (v: unknown): string | undefined => {
   // The endpoint answers ISO 8601; a rate-limit header's epoch seconds are read too
@@ -433,11 +445,12 @@ const asReading = (v: unknown): ScopedReading | null => {
   return r !== null && typeof r === 'object' && typeof r.at === 'number' && Array.isArray(r.limits) ? r : null
 }
 
-// The windows a reading draws at `at`: none from a stale reading, and none whose window has reset
-// since it was read (the next reading says where the new window stands)
+// The windows a reading draws at `at`: none whose window has reset since it was read (the next
+// reading says where the new window stands), each marked stale when the reading is old
 export const modelsAt = (r: ScopedReading | null, at: number): Scoped[] => {
-  if (!r || at - r.at > SCOPED_STALE_MS) return []
-  return r.limits.filter(l => !l.resetsAt || Date.parse(l.resetsAt) > at)
+  if (!r) return []
+  const stale = at - r.at > SCOPED_STALE_MS
+  return r.limits.filter(l => !l.resetsAt || Date.parse(l.resetsAt) > at).map(l => (stale ? { ...l, stale } : l))
 }
 
 // Asks the endpoint when the shared attempt is due, and takes what it answers; otherwise takes the
@@ -449,21 +462,27 @@ export const pollScoped = async ($: EngineInterface): Promise<void> => {
   const tried = await $.store.get(SCOPED_TRIED_KEY)
   const due = !(typeof tried === 'number' && tried <= at && at - tried < SCOPED_EVERY_MS)
   if (due) {
+    // Why an attempt failed is kept, so a reading that stops coming can be told apart from one
+    // never asked for; the next attempt is five minutes away either way
+    const failed = (e: Omit<ScopedError, 'at'>) => $.store.set(SCOPED_ERROR_KEY, { at, ...e } satisfies ScopedError)
     try {
       const auth = await $.session.authorize()
-      if (auth) {
+      if (!auth) await failed({ reason: 'no-login' })
+      else {
         await $.store.set(SCOPED_TRIED_KEY, at)
         const res = await $.http.fetch(SCOPED_URL, { auth: auth.handle })
         const limits = res.ok ? parseScoped(JSON.parse(res.text)) : null
         if (limits) {
           const reading = { at, limits }
           await $.store.set(SCOPED_KEY, reading)
+          if ((await $.store.get(SCOPED_ERROR_KEY)) != null) await $.store.set(SCOPED_ERROR_KEY, null)
           await setScoped($, reading)
           return
         }
+        await failed(res.ok ? { status: res.status, reason: 'shape' } : { status: res.status })
       }
-    } catch {
-      // The next attempt is five minutes away
+    } catch (err) {
+      await failed({ reason: String(err).slice(0, 200) }).catch(() => {})
     }
   }
   const shared = asReading(await $.store.get(SCOPED_KEY))
@@ -606,22 +625,22 @@ const barColor = (hue: string) => {
 }
 
 type EMetric =
-  | { kind: 'limit'; id: string; label: string; pct: number; left: string; hue: string; alt: string }
+  | { kind: 'limit'; id: string; label: string; pct: number; left: string; hue: string; alt: string; stale?: boolean }
   | { kind: 'ctx'; tokens: string; window: string; pct: number; hue: string; alt: string }
   | { kind: 'cache'; pct: number; hue: string; alt: string }
 
 export const editorMetrics = (m: Measure | null, t: TurnTokens | null, at: number, models: Scoped[] = []): EMetric[] => {
   const out: EMetric[] = []
-  const limit = (id: string, label: string, l: Window | undefined, hue: string, alt: string) => {
+  const limit = (id: string, label: string, l: Window | undefined, hue: string, alt: string, stale = false) => {
     if (!l) return
     const pct = Math.round(l.percentUsed)
-    out.push({ kind: 'limit', id, label, pct, left: l.resetsAt ? fmtLeft(Date.parse(l.resetsAt) - at) : '', hue: pct >= 80 ? RED : hue, alt })
+    out.push({ kind: 'limit', id, label, pct, left: l.resetsAt ? fmtLeft(Date.parse(l.resetsAt) - at) : '', hue: pct >= 80 ? RED : hue, alt, ...(stale ? { stale } : {}) })
   }
   const five = m?.rateLimits.find(l => l.kind === 'five_hour')
   const seven = m?.rateLimits.find(l => l.kind === 'seven_day')
   limit('5h', '5h', five, HUE.five, `5-hour limit ${Math.round(five?.percentUsed ?? 0)}% used`)
   limit('7d', '7d', seven, HUE.seven, `7-day limit ${Math.round(seven?.percentUsed ?? 0)}% used`)
-  models.forEach((s, i) => limit(`m${i}`, s.label, s, HUE.model, `${s.label} 7-day limit ${Math.round(s.percentUsed)}% used`))
+  models.forEach((s, i) => limit(`m${i}`, s.label, s, HUE.model, altOf(s), s.stale))
   if (m) {
     const pct = m.context.percent ?? 0
     out.push({ kind: 'ctx', tokens: fmtTokens(m.context.tokens ?? 0), window: `/${fmtTokens(m.context.window)}`, pct, hue: pct >= 80 ? RED : HUE.ctx, alt: '' })
@@ -678,6 +697,8 @@ const editorTier = (ms: EMetric[], tier: Tier, ti: number, shines: boolean) => {
         x += tier.gap
       }
       const id = `t${ti}g${gi}`
+      // A stale window's parts are each drawn faded, and its bar gets no shine
+      const from = parts.length
       if (mt.kind === 'limit') {
         put(lab(mt.hue, x, mt.label))
         x += eTextW(mt.label) + tier.inner
@@ -691,7 +712,7 @@ const editorTier = (ms: EMetric[], tier: Tier, ti: number, shines: boolean) => {
             `<rect ${bar} width="${r3(px)}"${cls ? ` class="${cls}"` : ''}` +
             (cls || sized ? ` style="${[cls ? paintBar(mt.hue) : '', sized ? `width:${w}` : ''].filter(Boolean).join(';')}"` : '') + '/>'
           put(rect('trk', grown, tier.bar), rect('bar', fill, fw))
-          if (shines && fw > 0) {
+          if (shines && fw > 0 && !mt.stale) {
             const name = barShare ? `s${ti}b` : `s${tier.bar + SHINE_W}`
             used.set(name, run)
             put(
@@ -745,6 +766,7 @@ const editorTier = (ms: EMetric[], tier: Tier, ti: number, shines: boolean) => {
         put(fig(mt.hue, x, pct))
         x += eTextW(pct)
       }
+      if (mt.kind === 'limit' && mt.stale) for (const p of parts.slice(from)) p.s = `<g opacity="${STALE_OPACITY}">${p.s}</g>`
     })
     // Consecutive parts at the same share sit in one shifted group
     let body = ''
@@ -898,7 +920,11 @@ const setTurn = async ($: EngineInterface, next: TurnTokens) => {
   await swept($)
 }
 
+// Hands each reading to `$.usageBand`; set by register
+let latestReading: (r: ScopedReading) => void = () => {}
+
 const setScoped = async ($: EngineInterface, next: ScopedReading) => {
+  latestReading(next)
   const [m, t, at, s] = await readAll($)
   const when = at || (await $.clock.now())
   if (s && s.at >= next.at) return
@@ -937,6 +963,34 @@ export const register: Register = on => {
   // The terminal animates by redrawing; started by its first draw, so a session without a terminal
   // never runs it. A reload drops the timer and this flag together.
   let isAnimating = false
+  // The minute timer that asks the endpoint when due and moves the countdowns on. A reload drops it
+  // with this flag and runs no session.start, so a draw or a measure after one starts it again.
+  let isPolling = false
+  // The last reading this process saw, for `$.usageBand`: the engine another mod calls through is
+  // its own, so this mod's store and atoms are not reachable from there
+  let lastReading: ScopedReading | null = null
+  latestReading = r => {
+    if (!lastReading || r.at > lastReading.at) lastReading = r
+  }
+
+  // Other mods read the per-model windows through `$.usageBand.modelLimits()` (types/index.d.ts)
+  on('engine.create', async (_$, e, next) => {
+    const beneath = await next(e)
+    return {
+      ...beneath,
+      usageBand: {
+        modelLimits: async () => {
+          if (!lastReading) return null
+          const at = await beneath.clock.now()
+          return {
+            at: lastReading.at,
+            stale: at - lastReading.at > SCOPED_STALE_MS,
+            limits: modelsAt(lastReading, at).map(({ label, percentUsed, resetsAt }) => ({ label, percentUsed, ...(resetsAt ? { resetsAt } : {}) })),
+          }
+        },
+      },
+    }
+  })
 
   on('session.start', async ($, e, next) => {
     const result = await next(e)
@@ -957,9 +1011,12 @@ export const register: Register = on => {
     // The session starts without waiting on the endpoint
     void pollScoped($)
     await tick($)
-    $.clock.every(60_000, () => {
-      void pollScoped($).then(() => tick($))
-    })
+    if (!isPolling) {
+      isPolling = true
+      $.clock.every(60_000, () => {
+        void pollScoped($).then(() => tick($))
+      })
+    }
     return result
   })
 
@@ -970,6 +1027,14 @@ export const register: Register = on => {
     }
     await setMeasure($, m)
     await tick($)
+    if (!isPolling) {
+      isPolling = true
+      $.clock.every(60_000, () => {
+        void pollScoped($).then(() => tick($))
+      })
+      // A host that answers nothing here (a test, say) leaves the band as it is
+      void pollScoped($).catch(() => {})
+    }
     return next(e)
   })
 
@@ -1023,6 +1088,13 @@ export const register: Register = on => {
   // the slot to the hooks beneath.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const theirs = await next(e)
+    if (!isPolling) {
+      isPolling = true
+      $.clock.every(60_000, () => {
+        void pollScoped($).then(() => tick($))
+      })
+      void pollScoped($).then(() => tick($)).catch(() => {})
+    }
     if (e.props.hasSurvey) return theirs
     const m = await read($, measure)
     const t = await read($, turn)

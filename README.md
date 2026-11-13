@@ -1,4 +1,4 @@
-## Local fork changes (1.0.6-px.2)
+## Local fork changes (1.0.6-px.3)
 
 This is `usage-band-px`, a local fork of usage-band 1.0.6. It draws the band in VS Code's box above the prompt, to the shared box's contract in `claude-mod/layout/ABOVE-PROMPT.md` (C1 and C2). It also adds each per-model weekly window (Fable's) beside the 7-day one. The desktop keeps upstream's look, apart from the stacking and the per-model window; the terminal keeps it too, with its line taking the slot's width.
 
@@ -21,7 +21,10 @@ This is `usage-band-px`, a local fork of usage-band 1.0.6. It draws the band in 
   - The answer's `limits` rows of kind `weekly_scoped` give the label (`scope.model.display_name`), `percent` and `resets_at`. The `model_scoped` shape that Claude Code's SDK projects them to is read too.
   - It asks at most once per 5 minutes across all open sessions. The time of the last attempt (`scoped-tried`) and the reading (`scoped`) are shared through `$.store`.
   - The attempt's time is written before the request, so a refused request waits out the same 5 minutes. A session with no first-party login asks nothing. Session start does not wait on it.
-  - A reading older than 30 minutes, or a window that has reset since it was read, is not drawn.
+  - Why the last attempt failed is kept in `scoped-error` (`{ at, status }`, or `{ at, reason }` with `no-login`, `shape` or the error's text); a reading clears it to null.
+  - The timer that asks is started at session start, and again by the first draw or measure after a `/reload-plugins`, which drops the timer and runs no session start.
+  - A window that has reset since it was read is not drawn. A reading older than 30 minutes is drawn faded (opacity 0.55) and still: no shine, and its alt text says it has not been updated for over 30 minutes. The faded figures fall under 4.5:1 on purpose, so they read as old.
+- **`$.usageBand.modelLimits()`** gives other mods the per-model windows, read-only, so they need not ask the endpoint themselves. It resolves to `{ at, stale, limits: [{ label, percentUsed, resetsAt }] }` (`at` in ms since the epoch, `stale` past 30 minutes, `resetsAt` ISO 8601, windows past their reset left out), or null before the first reading. The types are in `usage-band/types/index.d.ts`. Where usage-band is not installed there is no `$.usageBand`, so a caller wraps the call in `try`/`catch`.
 - **Stacking, on every surface:** the row goes on top, and what the hooks beneath drew stays under it (C1). Claude Code's own placeholder (`{ type: 'engine' }`) is never nested, and a survey keeps the slot to the hooks beneath.
 - **Space in VS Code's box** (C2), in lines of 1.4 × 13px:
   - `paddingTop 0.173` puts the row's first ink 7px under the host's title, 3px under a divider above it, and 5.5–6px under the frame's top edge without the title.

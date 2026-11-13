@@ -1,10 +1,15 @@
 // The fork's own behaviour: the per-model weekly windows from the usage endpoint, the VS Code row
 // in the box above the prompt, and how the row stacks with the rows of the hooks beneath it.
 import { expect, mock, test } from 'claude-code/testing'
+import type { Plugin } from 'claude-code/testing'
+import type { CommandRunInput } from 'claude-code'
 
 import {
+  SCOPED_ERROR_KEY,
   SCOPED_EVERY_MS,
   SCOPED_URL,
+  STALE_OPACITY,
+  desktopSvg,
   fit,
   LEFT_X,
   SPACE,
@@ -151,12 +156,58 @@ test('a refused request keeps the reading and is not repeated within five minute
   expect(asked.length).toBe(2)
 })
 
-test('a stale reading, or a window that has reset since, is not drawn', async () => {
+test('a stale reading is kept and marked stale; a window that has reset since is not drawn', async () => {
   const reading = { at: NOW, limits: FABLE }
   expect(modelsAt(reading, NOW + 10 * MIN)).toEqual(FABLE)
-  expect(modelsAt(reading, NOW + 31 * MIN)).toEqual([])
+  expect(modelsAt(reading, NOW + 31 * MIN)).toEqual([{ ...FABLE[0]!, stale: true }])
   expect(modelsAt({ at: NOW, limits: [{ label: 'Fable', percentUsed: 20, resetsAt: new Date(NOW + MIN).toISOString() }] }, NOW + 2 * MIN)).toEqual([])
   expect(modelsAt(null, NOW)).toEqual([])
+})
+
+test('a stale window is drawn faded and still on every surface, and says so to a screen reader', async () => {
+  const stale = [{ ...FABLE[0]!, stale: true }]
+  const vs = editorSvg(MEASURE, TURN, NOW, stale, true).svg
+  // The 7d window keeps its shine; the faded Fable window's parts carry none
+  const faded = [...vs.matchAll(new RegExp(`<g opacity="${STALE_OPACITY}">(.*?)</g>(?=<g opacity|<rect x="[^"]*" y="[^"]*" width="1"|<text|</g>)`, 'g'))]
+  expect(faded.length).toBeGreaterThan(0)
+  expect(faded.some(f => f[1]!.includes('url(#shine)'))).toBe(false)
+  expect(vs).toContain('url(#shine)')
+  const desk = desktopSvg(MEASURE, TURN, NOW, stale).svg
+  expect(desk).toContain(`<g opacity="${STALE_OPACITY}">`)
+  expect(desk.match(/<animate /g)?.length).toBe(2)   // the 7d bar and the context dots, not Fable's
+  const term = fit(MEASURE, TURN, NOW, 140, 3, { style: 'unicode', colors: 'true' }, stale)
+  const at = term.findIndex(sp => sp.text.startsWith('Fable'))
+  const sep = term.findIndex((sp, i) => i > at && sp.text.trim() === '' && sp.text.length >= 2)
+  expect(term.slice(at, sep).every(sp => sp.dim)).toBe(true)
+})
+
+test('a failed attempt is recorded with its reason, and cleared by the next reading', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const store = new Map<string, unknown>([['welcomed', true]])
+  let status = 429
+  world(on, store, () => ({ status, text: status === 200 ? body() : '{"error":"rate_limited"}' }))
+  await $.session.start(START)
+  await clock.settle()
+  expect(store.get(SCOPED_ERROR_KEY)).toEqual({ at: NOW, status: 429 })
+  status = 200
+  await clock.advance(SCOPED_EVERY_MS)
+  await clock.settle()
+  expect(store.get(SCOPED_ERROR_KEY)).toBe(null)
+  expect(store.get('scoped')).toEqual({ at: NOW + SCOPED_EVERY_MS, limits: FABLE })
+})
+
+test('a draw with no session.start (after a reload) starts the five-minute asking again', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const store = new Map<string, unknown>([['welcomed', true]])
+  const asked = world(on, store, () => ({ status: 200, text: body() }))
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'vscode', ...BAND })
+  await ui.drawn()
+  await clock.settle()
+  expect(asked.length).toBe(1)
+  await clock.advance(SCOPED_EVERY_MS)
+  await clock.settle()
+  expect(asked.length).toBe(2)
+  await ui.unmount()
 })
 
 // ---- The VS Code row
@@ -398,4 +449,30 @@ test('the terminal line fills `bodyColumns` less its padding (Claude Code\'s `[-
   // paddingX 1 on each side
   expect([...texts].length).toBe(120 - 2)
   await ui.unmount()
+})
+
+// A consumer seated beside the mod: the way another plugin (Habblaud, say) calls the noun
+const peek: Plugin = {
+  name: 'peek',
+  register(on) {
+    on('command.run', { command: 'peek' }, async $ => ({ text: JSON.stringify(await $.usageBand.modelLimits()) }))
+  },
+}
+const peekCmd = { command: 'peek', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } } as unknown as CommandRunInput
+
+test('other mods read the windows through $.usageBand.modelLimits()', { plugins: [peek] }, async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const store = new Map<string, unknown>([['welcomed', true]])
+  let status = 200
+  world(on, store, () => ({ status, text: status === 200 ? body() : '{"error":"rate_limited"}' }))
+  const read = async () => JSON.parse(((await $.command.run(peekCmd)) as { text: string }).text)
+  expect(await read()).toBe(null)
+  await $.session.start(START)
+  await clock.settle()
+  expect(await read()).toEqual({ at: NOW, stale: false, limits: FABLE })
+  // Half an hour on with no new reading (the endpoint refusing), the same windows, marked stale
+  status = 429
+  await clock.advance(31 * MIN)
+  await clock.settle()
+  expect(await read()).toEqual({ at: NOW, stale: true, limits: FABLE })
 })
