@@ -1,4 +1,4 @@
-## Local fork changes (1.0.6-px.4)
+## Local fork changes (1.0.6-px.5)
 
 This is `usage-band-px`, a local fork of usage-band 1.0.6. It draws the band in VS Code's box above the prompt, to the shared box's contract in `claude-mod/layout/ABOVE-PROMPT.md` (C1 and C2). It also adds each per-model weekly window (Fable's) beside the 7-day one. The desktop keeps upstream's look, apart from the stacking and the per-model window; the terminal keeps it too, with its line taking the slot's width.
 
@@ -27,9 +27,9 @@ This is `usage-band-px`, a local fork of usage-band 1.0.6. It draws the band in 
 - **`$.usageBand.modelLimits()`** gives other mods the per-model windows, read-only, so they need not ask the endpoint themselves. It resolves to `{ at, stale, limits: [{ label, percentUsed, resetsAt }] }` (`at` in ms since the epoch, `stale` past 30 minutes, `resetsAt` ISO 8601, windows past their reset left out), or null before the first reading. The types are in `usage-band/types/index.d.ts`. Where usage-band is not installed there is no `$.usageBand`, so a caller wraps the call in `try`/`catch`.
 - **Stacking, on every surface:** the row goes on top, and what the hooks beneath drew stays under it (C1). Claude Code's own placeholder (`{ type: 'engine' }`) is never nested, and a survey keeps the slot to the hooks beneath.
 - **Space in VS Code's box** (C2), in lines of 1.4 × 13px:
-  - `paddingTop 0.173` puts the row's first ink 7px under the host's title, 3px under a divider above it, and 5.5–6px under the frame's top edge without the title.
+  - `paddingTop 0.146` puts the row's first ink 4.5px under its top: 7px under the host's title when the row is the box's first, 3px under box-layout's divider otherwise (Claude Code 2.1.323 draws each mod's row alone).
   - A block beneath is joined by the divider: `marginTop 0.122` from the foot of the context's `/`, the row's last ink, to the join; the line hangs `0.044`. A block with no top space of its own gets `marginBottom 0.06` under it.
-  - With nothing beneath, `paddingBottom 0.03` puts the box's bottom edge 5px under the row.
+  - With nothing beneath, `paddingBottom 0.057` leaves 1px under the row's last ink: 5px to the box's bottom edge, 3px to box-layout's divider.
   - Measured in the composite preview (`layout/preview`, every case, 280, 420 and 640px, light and dark): title → row 7.0, top edge → row 5.5–6.0, divider → row 2.5–3.0, row → divider 3.0–3.5, row → bottom edge 4.5–5.0.
 - **What it can reach** grows by the one request above and two keys in its own store. It still reads no files and runs no processes.
 

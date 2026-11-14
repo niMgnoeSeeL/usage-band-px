@@ -345,31 +345,17 @@ const mountWith = async ($: any, on: On, surface: string, beneath: unknown) => {
 }
 const strip = (n: any): any => (n && typeof n === 'object' ? (({ part, ...rest }) => ({ ...rest, children: (rest.children ?? []).map(strip) }))(n) : n)
 
-test('VS Code: the row goes on top, a divider joins it to a block that starts spaced, which is kept whole', async ($, on) => {
+// Claude Code 2.1.323 asks each plugin for its own row and stacks the rows itself; box-layout arranges them, a divider
+// between every two (its tests cover that). The drawn list holds this mod's row beside the test's own, `part` naming each.
+const own = (tree: any) => tree.children.find((c: any) => c.part?.plugin === 'usage-band')
+
+test('VS Code: the row is drawn alone, with its own space above and under it and no divider', async ($, on) => {
   const tree = await mountWith($, on, 'vscode', SPACED)
-  expect(tree.type).toBe('Box')
-  expect(tree.props).toEqual({ flexDirection: 'column', paddingTop: SPACE.above })
-  const [row, divider, below] = tree.children
+  const row = own(tree)
+  expect(row.props).toEqual({ flexDirection: 'column', paddingTop: SPACE.above, paddingBottom: SPACE.end })
   expect(JSON.stringify(row)).toContain('"type":"Svg"')
-  expect(divider).toEqual({
-    type: 'Box',
-    props: { flexDirection: 'column', height: 0, marginTop: SPACE.between },
-    children: [{ type: 'Box', props: { height: 0.055, marginTop: 0.044, flexShrink: 0, backgroundColor: 'promptBorder' } }],
-  })
-  expect(strip(below)).toEqual(strip(SPACED))
-})
-
-test('VS Code: a block with no top space gets the space under the divider', async ($, on) => {
-  const tree = await mountWith($, on, 'vscode', ROW)
-  expect(tree.children[1].props.marginBottom).toBe(SPACE.unspaced)
-  expect(tree.props.paddingBottom).toBeUndefined()
-})
-
-test('VS Code: with nothing beneath, or only the engine placeholder, the row stands alone and owns the bottom edge', async ($, on) => {
-  const tree = await mountWith($, on, 'vscode', { type: 'Box', props: {}, children: [] })
-  expect(tree.props).toEqual({ flexDirection: 'column', paddingTop: SPACE.above, paddingBottom: SPACE.end })
-  expect(tree.children.length).toBe(1)
-  expect(JSON.stringify(tree)).not.toContain('"engine"')
+  expect(JSON.stringify(row)).not.toContain('promptBorder')
+  expect(JSON.stringify(row)).not.toContain('"engine"')
 })
 
 test('the engine placeholder is never nested', async ($, on) => {

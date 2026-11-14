@@ -854,7 +854,7 @@ export const editorSvg = (m: Measure | null, t: TurnTokens | null, at: number, m
 //   The row's last ink is the foot of the context's `/`, 1px under the figures' baseline.
 // - unspaced: under the divider, before a block beneath that brings no space of its own;
 // - end: with nothing beneath, the row owns the box's bottom edge: 5px under its last ink.
-export const SPACE = { above: 0.173, between: 0.122, unspaced: 0.06, end: 0.03 } as const
+export const SPACE = { above: 0.146, between: 0.122, unspaced: 0.06, end: 0.057 } as const
 // The divider between two mods' blocks: 1px of the theme's prompt border color, its Box of no
 // height, the line hanging DIVIDER.hang under the join
 export const DIVIDER = { line: 0.055, hang: 0.044 } as const
