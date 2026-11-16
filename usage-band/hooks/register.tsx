@@ -423,6 +423,26 @@ export const SCOPED_KEY = 'scoped'
 export const SCOPED_TRIED_KEY = 'scoped-tried'
 // Why the last attempt failed (ScopedError); null once an attempt succeeds
 export const SCOPED_ERROR_KEY = 'scoped-error'
+// While the endpoint refuses (429 and other failures), the next attempt waits longer: the Retry-After it gives, or
+// 5 minutes doubled for each failure in a row, up to an hour. `{ until, failures }`, shared by the sessions
+export const SCOPED_BACKOFF_KEY = 'scoped-backoff'
+export const SCOPED_BACKOFF_MAX_MS = 60 * 60_000
+// The last attempts, newest last: `{ at, status, retryAfterS? }`, so a reading that stops coming can be explained
+export const SCOPED_LOG_KEY = 'scoped-log'
+export const SCOPED_LOG_SIZE = 50
+
+/** The wait a failed attempt starts: the endpoint's Retry-After (seconds or a date) when it gives one, else 5 minutes
+ *  doubled for each failure in a row; never under 5 minutes or over an hour. */
+export const backoffMs = (failures: number, retryAfter: string | undefined, at: number) => {
+  const secs = retryAfter !== undefined && /^\d+$/.test(retryAfter.trim()) ? Number(retryAfter) * 1000 : retryAfter ? Date.parse(retryAfter) - at : NaN
+  const doubled = SCOPED_EVERY_MS * 2 ** Math.max(0, failures - 1)
+  return Math.min(SCOPED_BACKOFF_MAX_MS, Math.max(SCOPED_EVERY_MS, Number.isFinite(secs) ? secs : doubled))
+}
+const headerOf = (headers: unknown, name: string): string | undefined => {
+  if (!headers || typeof headers !== 'object') return undefined
+  const hit = Object.entries(headers as Record<string, unknown>).find(([k]) => k.toLowerCase() === name)
+  return typeof hit?.[1] === 'string' ? hit[1] : undefined
+}
 
 const isoOf = (v: unknown): string | undefined => {
   // The endpoint answers ISO 8601; a rate-limit header's epoch seconds are read too
@@ -476,7 +496,9 @@ export const modelsAt = (r: ScopedReading | null, at: number): Scoped[] => {
 export const pollScoped = async ($: EngineInterface): Promise<void> => {
   const at = await $.clock.now()
   const tried = await $.store.get(SCOPED_TRIED_KEY)
-  const due = !(typeof tried === 'number' && tried <= at && at - tried < SCOPED_EVERY_MS)
+  const back = (await $.store.get(SCOPED_BACKOFF_KEY)) as { until?: number; failures?: number } | null | undefined
+  const waiting = typeof back?.until === 'number' && at < back.until && back.until - at <= SCOPED_BACKOFF_MAX_MS
+  const due = !waiting && !(typeof tried === 'number' && tried <= at && at - tried < SCOPED_EVERY_MS)
   if (due) {
     // Why an attempt failed is kept, so a reading that stops coming can be told apart from one
     // never asked for; the next attempt is five minutes away either way
@@ -487,14 +509,20 @@ export const pollScoped = async ($: EngineInterface): Promise<void> => {
       else {
         await $.store.set(SCOPED_TRIED_KEY, at)
         const res = await $.http.fetch(SCOPED_URL, { auth: auth.handle })
+        const retryAfter = headerOf(res.headers, 'retry-after')
+        const log = ((await $.store.get(SCOPED_LOG_KEY)) as unknown[] | null | undefined) ?? []
+        await $.store.set(SCOPED_LOG_KEY, [...(Array.isArray(log) ? log : []), { at, status: res.status, ...(retryAfter ? { retryAfterS: retryAfter } : {}) }].slice(-SCOPED_LOG_SIZE))
         const limits = res.ok ? parseScoped(JSON.parse(res.text)) : null
         if (limits) {
           const reading = { at, limits }
           await $.store.set(SCOPED_KEY, reading)
           if ((await $.store.get(SCOPED_ERROR_KEY)) != null) await $.store.set(SCOPED_ERROR_KEY, null)
+          if (back != null) await $.store.set(SCOPED_BACKOFF_KEY, null)
           await setScoped($, reading)
           return
         }
+        const failures = (back?.failures ?? 0) + 1
+        await $.store.set(SCOPED_BACKOFF_KEY, { until: at + backoffMs(failures, retryAfter, at), failures })
         await failed(res.ok ? { status: res.status, reason: 'shape' } : { status: res.status })
       }
     } catch (err) {
