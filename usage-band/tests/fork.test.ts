@@ -62,7 +62,7 @@ const body = (percent = 20, resets: unknown = RESET.replace('Z', '712+00:00')) =
   })
 
 type On = Parameters<typeof mock.clock>[0]
-const world = (on: On, store: Map<string, unknown>, answer: () => { status: number; text: string }, login = true) => {
+const world = (on: On, store: Map<string, unknown>, answer: () => { status: number; text: string }, login = true, env: Record<string, string> = {}) => {
   const asked: { url: string; auth?: string }[] = []
   on('store.get', ($, e) => ({ value: store.get(e.key) }))
   on('store.set', ($, e) => {
@@ -78,7 +78,7 @@ const world = (on: On, store: Map<string, unknown>, answer: () => { status: numb
     return { value: { status, ok: status >= 200 && status < 300, headers: {}, text } }
   })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('env.get', () => ({ value: undefined }))
+  on('env.get', ($, e) => ({ value: env[e.name] }))
   on('command.register', ($, e) => ({ value: { command: e.name } }) as never)
   return asked
 }
@@ -197,6 +197,20 @@ test('a failed attempt is recorded with its reason, and cleared by the next read
   await clock.settle()
   expect(store.get(SCOPED_ERROR_KEY)).toBe(null)
   expect(store.get('scoped')).toEqual({ at: NOW + SCOPED_EVERY_MS, limits: FABLE })
+})
+
+test('on Bedrock the session neither asks the endpoint nor shows the plan\'s windows the other sessions read', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const store = new Map<string, unknown>([['welcomed', true], ['scoped', { at: NOW - MIN, limits: FABLE }], ['scoped-tried', NOW - 10 * MIN]])
+  const asked = world(on, store, () => ({ status: 200, text: body() }), true, { CLAUDE_CODE_USE_BEDROCK: '1' })
+  await $.session.start(START)
+  await clock.settle()
+  await clock.advance(SCOPED_EVERY_MS)
+  await clock.settle()
+  expect(asked).toEqual([])
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'vscode', ...BAND })
+  expect(String((await ui.find({ type: 'Svg' }))?.props.alt)).not.toContain('Fable')
+  await ui.unmount()
 })
 
 test('a draw with no session.start (after a reload) starts the five-minute asking again', async ($, on) => {

@@ -493,7 +493,17 @@ export const modelsAt = (r: ScopedReading | null, at: number): Scoped[] => {
 // reading another session shared. A session with no first-party login, a refused request or an
 // answer in another shape keeps the reading it has. The attempt's time is written before the
 // request, so the sessions that tick meanwhile wait out the same five minutes.
+const isSet = (v: string | undefined) => v !== undefined && v !== '' && v !== '0' && v.toLowerCase() !== 'false'
+
+// A session on a provider other than Anthropic's own API (Bedrock, Vertex, Foundry) is not billed against the Claude
+// plan the usage endpoint reports on, so the per-model windows say nothing about it: it neither asks nor shows the
+// reading the other sessions share
+export async function onThirdParty($: EngineInterface): Promise<boolean> {
+  return isSet(await $.env.get('CLAUDE_CODE_USE_BEDROCK')) || isSet(await $.env.get('CLAUDE_CODE_USE_VERTEX')) || isSet(await $.env.get('CLAUDE_CODE_USE_FOUNDRY'))
+}
+
 export const pollScoped = async ($: EngineInterface): Promise<void> => {
+  if (await onThirdParty($)) return
   const at = await $.clock.now()
   const tried = await $.store.get(SCOPED_TRIED_KEY)
   const back = (await $.store.get(SCOPED_BACKOFF_KEY)) as { until?: number; failures?: number } | null | undefined
