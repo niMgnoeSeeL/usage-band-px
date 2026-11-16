@@ -199,17 +199,25 @@ test('a failed attempt is recorded with its reason, and cleared by the next read
   expect(store.get('scoped')).toEqual({ at: NOW + SCOPED_EVERY_MS, limits: FABLE })
 })
 
-test('on Bedrock the session neither asks the endpoint nor shows the plan\'s windows the other sessions read', async ($, on) => {
+test('on Bedrock the session neither asks the endpoint nor shows the plan\'s windows, even one read before it moved there', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
-  const store = new Map<string, unknown>([['welcomed', true], ['scoped', { at: NOW - MIN, limits: FABLE }], ['scoped-tried', NOW - 10 * MIN]])
-  const asked = world(on, store, () => ({ status: 200, text: body() }), true, { CLAUDE_CODE_USE_BEDROCK: '1' })
+  const store = new Map<string, unknown>([['welcomed', true]])
+  const env: Record<string, string> = {}
+  const asked = world(on, store, () => ({ status: 200, text: body() }), true, env)
+  // On the Claude plan first: the reading is taken and shown
   await $.session.start(START)
   await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'vscode', ...BAND })
+  expect(String((await ui.find({ type: 'Svg' }))?.props.alt)).toContain('Fable 20%')
+  // Then moved to Bedrock and reloaded, which runs session.start again and keeps the session's state
+  env.CLAUDE_CODE_USE_BEDROCK = '1'
+  await $.session.start(START)
+  await clock.settle()
+  expect(String((await ui.find({ type: 'Svg' }))?.props.alt)).not.toContain('Fable')
+  const before = asked.length
   await clock.advance(SCOPED_EVERY_MS)
   await clock.settle()
-  expect(asked).toEqual([])
-  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'vscode', ...BAND })
-  expect(String((await ui.find({ type: 'Svg' }))?.props.alt)).not.toContain('Fable')
+  expect(asked.length).toBe(before)
   await ui.unmount()
 })
 

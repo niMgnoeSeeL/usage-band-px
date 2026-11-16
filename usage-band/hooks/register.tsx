@@ -1062,6 +1062,8 @@ export const register: Register = on => {
     }
     const usage = await $.session.usage()
     await setMeasure($, { context: usage.context, rateLimits: usage.rateLimits })
+    // A reload keeps the session's state: a reading taken before the session moved to a third-party provider is dropped
+    if (await onThirdParty($)) await update($, scoped, () => null)
     // The session starts without waiting on the endpoint
     void pollScoped($)
     await tick($)
