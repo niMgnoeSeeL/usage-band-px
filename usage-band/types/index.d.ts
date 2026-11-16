@@ -6,8 +6,9 @@ export type Measure = {
 export type TurnTokens = { input: number; output: number; cacheRead: number; cacheWrite: number }
 export type Style = 'nerd' | 'unicode' | 'ascii'
 // A weekly window scoped to one model, as the usage endpoint names it (`Fable`). `stale` marks a window
-// from a reading older than SCOPED_STALE_MS, drawn faded until a new reading comes.
-export type Scoped = { label: string; percentUsed: number; resetsAt?: string; stale?: boolean }
+// from a reading older than SCOPED_STALE_MS, drawn faded until a new reading comes. `note` takes the reset time's place
+// (a Bedrock budget's `$0.42/$200`).
+export type Scoped = { label: string; percentUsed: number; resetsAt?: string; stale?: boolean; note?: string }
 // The per-model windows as last read, and when (ms since the epoch); shared by every session
 export type ScopedReading = { at: number; limits: Scoped[] }
 

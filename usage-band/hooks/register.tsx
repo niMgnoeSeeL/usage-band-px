@@ -124,7 +124,8 @@ export const layout = (
     // A stale window's bar stands still: no highlight sweeps it
     if (detail === 2) out.push(...bar(pct, cells, color, stale ? -1 : frame, look.style), { text: ' ' })
     out.push({ text: `${pct}%`, color })
-    if (detail >= 1 && l.resetsAt) out.push({ text: ` · ${fmtLeft(Date.parse(l.resetsAt) - at)}`, dim: true })
+    const note = (l as Scoped).note
+    if (detail >= 1 && (note || l.resetsAt)) out.push({ text: ` · ${note ?? fmtLeft(Date.parse(l.resetsAt!) - at)}`, dim: true })
     groups.push(stale ? out.map(sp => ({ ...sp, dim: true })) : out)
   }
   limit('5h', m?.rateLimits.find(l => l.kind === 'five_hour'), HUE.five)
@@ -213,7 +214,7 @@ const limitGroup = (id: string, label: string, l: Window, hue: string, at: numbe
   const pct = Math.round(l.percentUsed)
   const color = pct >= 80 ? RED : hue
   const pctText = `${pct}%`
-  const left = l.resetsAt ? fmtLeft(Date.parse(l.resetsAt) - at) : ''
+  const left = (l as Scoped).note ?? (l.resetsAt ? fmtLeft(Date.parse(l.resetsAt) - at) : '')
   const labelW = textW(label, D.base) + D.inner
   const pctW = textW(pctText, D.base)
   const width = labelW + D.barW + D.inner + pctW + (left ? D.inner * 2 + 1 + textW(left, D.sm) : 0)
@@ -502,8 +503,45 @@ export async function onThirdParty($: EngineInterface): Promise<boolean> {
   return isSet(await $.env.get('CLAUDE_CODE_USE_BEDROCK')) || isSet(await $.env.get('CLAUDE_CODE_USE_VERTEX')) || isSet(await $.env.get('CLAUDE_CODE_USE_FOUNDRY'))
 }
 
+// ---- A Bedrock budget. On a third-party provider the Claude plan says nothing, so the row shows the budget the
+// session spends instead, as Habblaud works it out (the lab's hourly report plus its estimate of what was spent since):
+// USAGE_BAND_BEDROCK_URL is Habblaud's local address for it, USAGE_BAND_BEDROCK_KEY the name of the budget's row, both
+// set in the project's env. Read at most once per BEDROCK_EVERY_MS across sessions; a row is drawn as `Bedrock`, its
+// bar the share of the budget spent, `$0.42/$200` in the reset time's place.
+export const BEDROCK_EVERY_MS = 5 * 60_000
+export const BEDROCK_TRIED_KEY = 'bedrock-tried'
+export const BEDROCK_KEY = 'bedrock'
+export const parseBedrock = (body: unknown, name: string, at: number): ScopedReading | null => {
+  const keys = (body as { keys?: unknown } | null)?.keys
+  if (!Array.isArray(keys)) return null
+  const row = keys.find(k => (k as { name?: unknown })?.name === name) as { budgetUSD?: unknown; totalUSD?: unknown } | undefined
+  if (!row || typeof row.budgetUSD !== 'number' || row.budgetUSD <= 0 || typeof row.totalUSD !== 'number') return null
+  const usd = (v: number) => (v >= 100 ? `$${Math.round(v)}` : `$${v.toFixed(2)}`)
+  return { at, limits: [{ label: 'Bedrock', percentUsed: (100 * row.totalUSD) / row.budgetUSD, note: `${usd(row.totalUSD)}/${usd(row.budgetUSD)}` }] }
+}
+export async function pollBedrock($: EngineInterface): Promise<void> {
+  const url = await $.env.get('USAGE_BAND_BEDROCK_URL')
+  const name = await $.env.get('USAGE_BAND_BEDROCK_KEY')
+  if (!url || !name) return
+  const at = await $.clock.now()
+  const key = `${BEDROCK_KEY}:${name}`
+  const tried = await $.store.get(`${BEDROCK_TRIED_KEY}:${name}`)
+  if (!(typeof tried === 'number' && tried <= at && at - tried < BEDROCK_EVERY_MS)) {
+    await $.store.set(`${BEDROCK_TRIED_KEY}:${name}`, at)
+    try {
+      const res = await $.http.fetch(url)
+      const reading = res.ok ? parseBedrock(JSON.parse(res.text), name, at) : null
+      if (reading) await $.store.set(key, reading)
+    } catch {
+      // Habblaud is not running: the row keeps the last reading, faded once it is old
+    }
+  }
+  const shared = asReading(await $.store.get(key))
+  if (shared) await setScoped($, shared)
+}
+
 export const pollScoped = async ($: EngineInterface): Promise<void> => {
-  if (await onThirdParty($)) return
+  if (await onThirdParty($)) return pollBedrock($)
   const at = await $.clock.now()
   const tried = await $.store.get(SCOPED_TRIED_KEY)
   const back = (await $.store.get(SCOPED_BACKOFF_KEY)) as { until?: number; failures?: number } | null | undefined
@@ -688,7 +726,7 @@ export const editorMetrics = (m: Measure | null, t: TurnTokens | null, at: numbe
   const limit = (id: string, label: string, l: Window | undefined, hue: string, alt: string, stale = false) => {
     if (!l) return
     const pct = Math.round(l.percentUsed)
-    out.push({ kind: 'limit', id, label, pct, left: l.resetsAt ? fmtLeft(Date.parse(l.resetsAt) - at) : '', hue: pct >= 80 ? RED : hue, alt, ...(stale ? { stale } : {}) })
+    out.push({ kind: 'limit', id, label, pct, left: (l as Scoped).note ?? (l.resetsAt ? fmtLeft(Date.parse(l.resetsAt) - at) : ''), hue: pct >= 80 ? RED : hue, alt, ...(stale ? { stale } : {}) })
   }
   const five = m?.rateLimits.find(l => l.kind === 'five_hour')
   const seven = m?.rateLimits.find(l => l.kind === 'seven_day')
@@ -978,7 +1016,8 @@ const setTurn = async ($: EngineInterface, next: TurnTokens) => {
 let latestReading: (r: ScopedReading) => void = () => {}
 
 const setScoped = async ($: EngineInterface, next: ScopedReading) => {
-  latestReading(next)
+  // `$.usageBand.modelLimits()` gives the Claude plan's windows alone, never a Bedrock budget (it carries a note)
+  if (!next.limits.some(l => l.note)) latestReading(next)
   const [m, t, at, s] = await readAll($)
   const when = at || (await $.clock.now())
   if (s && s.at >= next.at) return

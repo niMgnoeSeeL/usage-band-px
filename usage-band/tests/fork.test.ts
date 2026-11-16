@@ -9,6 +9,7 @@ import {
   SCOPED_EVERY_MS,
   SCOPED_URL,
   STALE_OPACITY,
+  parseBedrock,
   shortAlt,
   desktopSvg,
   fit,
@@ -219,6 +220,39 @@ test('on Bedrock the session neither asks the endpoint nor shows the plan\'s win
   await clock.settle()
   expect(asked.length).toBe(before)
   await ui.unmount()
+})
+
+test('on Bedrock the row shows the budget Habblaud reports for the project\'s key, and nothing of the Claude plan', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const store = new Map<string, unknown>([['welcomed', true], ['scoped', { at: NOW - MIN, limits: FABLE }], ['scoped-tried', NOW - 10 * MIN]])
+  const card = { keys: [{ name: 'Other', budgetUSD: 50, totalUSD: 49 }, { name: 'NSF CoRe quantum proposal', budgetUSD: 200, totalUSD: 12.345 }] }
+  const asked = world(on, store, () => ({ status: 200, text: JSON.stringify(card) }), true, {
+    CLAUDE_CODE_USE_BEDROCK: '1', USAGE_BAND_BEDROCK_URL: 'http://127.0.0.1:4719/api/bedrock', USAGE_BAND_BEDROCK_KEY: 'NSF CoRe quantum proposal',
+  })
+  await $.session.start(START)
+  await clock.settle()
+  expect(asked.map(a => a.url)).toEqual(['http://127.0.0.1:4719/api/bedrock'])
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'vscode', ...BAND })
+  const alt = String((await ui.find({ type: 'Svg' }))?.props.alt)
+  expect(alt).toContain('Bedrock 6%')
+  expect(alt).not.toContain('Fable')
+  expect((await ui.find({ type: 'Svg' }))?.props.source).toContain('$12.35/$200')
+  // Asked again only after five minutes
+  await clock.advance(4 * MIN)
+  await clock.settle()
+  expect(asked.length).toBe(1)
+  await clock.advance(2 * MIN)
+  await clock.settle()
+  expect(asked.length).toBe(2)
+  await ui.unmount()
+})
+
+test('a Bedrock card is read for its own key only', () => {
+  const card = { keys: [{ name: 'A', budgetUSD: 200, totalUSD: 150 }, { name: 'B', budgetUSD: 0, totalUSD: 1 }] }
+  expect(parseBedrock(card, 'A', NOW)).toEqual({ at: NOW, limits: [{ label: 'Bedrock', percentUsed: 75, note: '$150/$200' }] })
+  expect(parseBedrock(card, 'B', NOW)).toBe(null)
+  expect(parseBedrock(card, 'C', NOW)).toBe(null)
+  expect(parseBedrock({ error: 'x' }, 'A', NOW)).toBe(null)
 })
 
 test('a draw with no session.start (after a reload) starts the five-minute asking again', async ($, on) => {

@@ -1,4 +1,4 @@
-## Local fork changes (1.0.6-px.8)
+## Local fork changes (1.0.6-px.9)
 
 This is `usage-band-px`, a local fork of usage-band 1.0.6. It draws the band in VS Code's box above the prompt, to the shared box's contract in `claude-mod/layout/ABOVE-PROMPT.md` (C1 and C2). It also adds each per-model weekly window (Fable's) beside the 7-day one. The desktop keeps upstream's look, apart from the stacking and the per-model window; the terminal keeps it too, with its line taking the slot's width.
 
@@ -26,6 +26,7 @@ This is `usage-band-px`, a local fork of usage-band 1.0.6. It draws the band in 
   - The timer that asks is started at session start, and again by the first draw or measure after a `/reload-plugins`, which drops the timer and runs no session start.
   - A window that has reset since it was read is not drawn. A reading older than 30 minutes is drawn faded (opacity 0.55) and still: no shine, and its alt text says it has not been updated for over 30 minutes. The faded figures fall under 4.5:1 on purpose, so they read as old.
 - **On Bedrock, Vertex or Foundry** (`CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`) the session is not billed against the Claude plan the usage endpoint reports on: it neither asks the endpoint nor shows the per-model windows the other sessions share. A reading the session held before it moved there is dropped at session start, which a `/reload-plugins` runs again.
+- **A Bedrock budget in their place.** With `USAGE_BAND_BEDROCK_URL` (Habblaud's local `GET /api/bedrock`) and `USAGE_BAND_BEDROCK_KEY` (the budget's row name) in the project's env, a Bedrock session reads it at most once per 5 minutes across sessions and draws `Bedrock` with the share of the budget spent and `$11.31/$200` in the reset time's place. The amount is Habblaud's: the lab's hourly report plus its estimate since. With Habblaud off the last reading stays, faded once it is half an hour old. `$.usageBand.modelLimits()` never returns it.
 - **`$.usageBand.modelLimits()`** gives other mods the per-model windows, read-only, so they need not ask the endpoint themselves. It resolves to `{ at, stale, limits: [{ label, percentUsed, resetsAt }] }` (`at` in ms since the epoch, `stale` past 30 minutes, `resetsAt` ISO 8601, windows past their reset left out), or null before the first reading. The types are in `usage-band/types/index.d.ts`. Where usage-band is not installed there is no `$.usageBand`, so a caller wraps the call in `try`/`catch`.
 - **Stacking, on every surface:** the row goes on top, and what the hooks beneath drew stays under it (C1). Claude Code's own placeholder (`{ type: 'engine' }`) is never nested, and a survey keeps the slot to the hooks beneath.
 - **Space in VS Code's box** (C2), in lines of 1.4 × 13px:
